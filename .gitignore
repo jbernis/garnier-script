@@ -1,8 +1,6 @@
-# Images téléchargées
-images/
-
 # Fichier CSV généré
-shopify_import.csv
+shopify_import*.csv
+images/
 
 # Python
 __pycache__/
@@ -28,4 +26,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Variables d'environnement (credentials)
+.env
 

@@ -41,7 +41,35 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-#### 3. Vérifier l'installation
+#### 3. Configurer les credentials
+
+Créez un fichier `.env` à partir de `.env.example` :
+
+```bash
+cp .env.example .env
+```
+
+Puis éditez le fichier `.env` et remplissez vos identifiants :
+
+```env
+BASE_URL=https://garnier-thiebaut.adsi.me
+USERNAME=votre_username
+PASSWORD=votre_password
+OUTPUT_CSV=shopify_import.csv
+```
+
+**Note importante** : Le nom du fichier CSV sera automatiquement généré avec la catégorie et la date/heure. Le format est : `{base}_{categorie}_{date_heure}.csv`
+
+**Exemples de noms générés :**
+
+- **Une catégorie** : `shopify_import_linge-de-table_20260105_183045.csv`
+- **Plusieurs catégories** : `shopify_import_linge-de-table_linge-de-lit_linge-de-bain_20260105_183045.csv`
+- **Toutes les catégories** (sans spécifier de catégorie) : `shopify_import_20260105_183045.csv`
+- **Avec --output personnalisé** : Le nom spécifié est utilisé tel quel (sans date/heure)
+
+Le format de la date/heure est `YYYYMMDD_HHMMSS` (exemple : `20260105_183045` = 5 janvier 2026 à 18:30:45).
+
+#### 4. Vérifier l'installation
 
 ```bash
 python scraper.py --list-categories

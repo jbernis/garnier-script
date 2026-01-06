@@ -15,6 +15,8 @@ import argparse
 from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Optional
 import unicodedata
+from datetime import datetime
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -30,12 +32,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Charger les variables d'environnement depuis .env
+load_dotenv()
+
 # Configuration
-BASE_URL = "https://garnier-thiebaut.adsi.me"
-USERNAME = "164049"
-PASSWORD = "thierry"
-IMAGES_DIR = "images"
-OUTPUT_CSV = "shopify_import.csv"
+BASE_URL = os.getenv("BASE_URL", "https://garnier-thiebaut.adsi.me")
+USERNAME = os.getenv("USERNAME", "")
+PASSWORD = os.getenv("PASSWORD", "")
+OUTPUT_CSV = os.getenv("OUTPUT_CSV", "shopify_import.csv")
+
+# Vérifier que les credentials sont définis
+if not USERNAME or not PASSWORD:
+    logger.error("Les credentials USERNAME et PASSWORD doivent être définis dans le fichier .env")
+    logger.error("Veuillez créer un fichier .env basé sur .env.example")
+    raise ValueError("Credentials manquants dans .env")
 
 # Headers pour simuler un navigateur
 HEADERS = {
@@ -888,63 +898,6 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
         return (None, driver, session)
 
 
-def download_image(driver: Optional[webdriver.Chrome], session: requests.Session, image_url: str, product_name: str, image_index: int = 0) -> Optional[str]:
-    """
-    Télécharge une image et la sauvegarde localement.
-    Le nom du fichier est basé sur le nom de l'article.
-    Retourne le nom du fichier local.
-    """
-    if not image_url:
-        return None
-    
-    try:
-        # Créer le dossier images s'il n'existe pas
-        os.makedirs(IMAGES_DIR, exist_ok=True)
-        
-        # Déterminer l'extension du fichier
-        parsed_url = urlparse(image_url)
-        path = parsed_url.path
-        ext = os.path.splitext(path)[1] or '.jpg'
-        
-        # Créer le nom de fichier basé sur le nom de l'article
-        # Nettoyer le nom pour qu'il soit valide comme nom de fichier
-        safe_name = slugify(product_name)
-        if image_index > 0:
-            filename = f"{safe_name}_{image_index}{ext}"
-        else:
-            filename = f"{safe_name}{ext}"
-        filepath = os.path.join(IMAGES_DIR, filename)
-        
-        # Télécharger l'image
-        try:
-            response = session.get(image_url, timeout=30, stream=True)
-            response.raise_for_status()
-            
-            # Sauvegarder l'image
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        except Exception as e:
-            logger.debug(f"Erreur lors du téléchargement de {image_url}: {e}")
-            # Essayer avec le driver si disponible
-            if driver:
-                try:
-                    driver.get(image_url)
-                    # Sauvegarder le screenshot (fallback)
-                    driver.save_screenshot(filepath)
-                except:
-                    return None
-            else:
-                return None
-        
-        logger.debug(f"Image téléchargée: {filename}")
-        return filename
-        
-    except Exception as e:
-        logger.warning(f"Erreur lors du téléchargement de l'image {image_url}: {e}")
-        return None
-
-
 def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
     """
     Génère un DataFrame pandas au format CSV Shopify.
@@ -969,26 +922,11 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
         # Créer le Handle
         handle = slugify(full_name)
         
-        # Collecter les URLs des images (on garde aussi le téléchargement pour sauvegarde locale)
+        # Collecter les URLs des images pour le CSV
         image_urls = []
-        driver = product_data.get('driver')
-        session = product_data.get('session')
         
-        # Télécharger les images localement (optionnel, pour sauvegarde)
-        # Utiliser le nom de l'article pour nommer les images
-        downloaded_images = []
-        for idx, image_url in enumerate(images):
-            # Télécharger pour sauvegarde locale avec le nom de l'article
-            img_filename = download_image(
-                driver,
-                session,
-                image_url,
-                full_name,  # Utiliser le nom complet de l'article
-                idx
-            )
-            if img_filename:
-                downloaded_images.append(img_filename)
-            # Garder l'URL pour le CSV
+        # Ajouter toutes les images trouvées
+        for image_url in images:
             if image_url:
                 image_urls.append(image_url)
         
@@ -996,15 +934,6 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
         if not image_urls and product_data.get('image_url'):
             # Vérifier que ce n'est pas product-default.jpg
             if 'product-default.jpg' not in product_data['image_url']:
-                img_filename = download_image(
-                    driver,
-                    session,
-                    product_data['image_url'],
-                    full_name,
-                    0
-                )
-                if img_filename:
-                    downloaded_images.append(img_filename)
                 image_urls.append(product_data['image_url'])
         
         # Utiliser SKU et gencode depuis les détails du produit
@@ -1012,15 +941,16 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
         product_gencode = product_details.get('gencode', '')
         
         # Créer une ligne par variante
-        # Shopify format: première ligne avec toutes les infos produit et variante
-        # Lignes suivantes pour les images supplémentaires (même Handle, autres champs vides sauf Image Src et Position)
+        # Shopify format: Pour chaque variant, créer une ligne par image
+        # La première ligne contient toutes les infos produit/variant + première image
+        # Les lignes suivantes contiennent seulement Handle + images supplémentaires
         for variant_idx, variant in enumerate(variants):
             # Utiliser le SKU de la variante ou celui du produit
             variant_sku = variant.get('sku') or variant.get('full_code') or product_sku
             variant_gencode = variant.get('gencode') or product_gencode
             
-            # Ligne principale avec les infos de la variante
-            main_row = {
+            # Informations communes pour toutes les lignes de ce variant
+            base_row = {
                 'Handle': handle or '',
                 'Title': full_name or '',
                 'Body (HTML)': description or '',
@@ -1041,9 +971,6 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
                 'Variant Requires Shipping': 'TRUE',
                 'Variant Taxable': 'TRUE',
                 'Variant Barcode': variant_gencode or '',
-                'Image Src': image_urls[0] if image_urls else '',
-                'Image Position': 1 if image_urls else '',
-                'Image Alt Text': full_name if image_urls else '',
                 'Gift Card': 'FALSE',
                 'SEO Title': full_name or '',
                 'SEO Description': (description[:160] if description else '') or '',
@@ -1067,14 +994,47 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
                 'Status': 'active',
             }
             
-            # Ajouter les images supplémentaires sur la même ligne (format Shopify compact)
-            # Shopify supporte Image Src, Image Src 2, Image Src 3, etc. sur la même ligne
-            for img_idx, image_url in enumerate(image_urls[1:], start=2):
-                main_row[f'Image Src {img_idx}'] = image_url
-                main_row[f'Image Position {img_idx}'] = img_idx
-                main_row[f'Image Alt Text {img_idx}'] = full_name
-            
-            rows.append(main_row)
+            # Si pas d'images, créer une seule ligne sans images
+            if not image_urls:
+                rows.append(base_row.copy())
+            else:
+                # Créer une ligne par image
+                for img_idx, image_url in enumerate(image_urls, start=1):
+                    row = base_row.copy()
+                    
+                    # Pour la première image, garder toutes les infos
+                    # Pour les images suivantes, vider les champs variant sauf Handle
+                    if img_idx > 1:
+                        # Vider les champs variant pour les lignes d'images supplémentaires
+                        row['Title'] = ''
+                        row['Body (HTML)'] = ''
+                        row['Vendor'] = ''
+                        row['Type'] = ''
+                        row['Tags'] = ''
+                        row['Option1 Name'] = ''
+                        row['Option1 Value'] = ''
+                        row['Variant SKU'] = ''
+                        row['Variant Grams'] = ''
+                        row['Variant Inventory Tracker'] = ''
+                        row['Variant Inventory Qty'] = ''
+                        row['Variant Inventory Policy'] = ''
+                        row['Variant Fulfillment Service'] = ''
+                        row['Variant Price'] = ''
+                        row['Variant Compare At Price'] = ''
+                        row['Variant Requires Shipping'] = ''
+                        row['Variant Taxable'] = ''
+                        row['Variant Barcode'] = ''
+                        row['Variant Image'] = ''
+                        row['Variant Weight Unit'] = ''
+                        row['Variant Tax Code'] = ''
+                        row['Cost per item'] = ''
+                    
+                    # Ajouter les informations de l'image
+                    row['Image Src'] = image_url
+                    row['Image Position'] = img_idx
+                    row['Image Alt Text'] = full_name or ''
+                    
+                    rows.append(row)
     
     # Créer le DataFrame
     df = pd.DataFrame(rows)
@@ -1198,11 +1158,30 @@ Exemples d'utilisation:
     
     args = parser.parse_args()
     
-    # Modifier le nom du fichier de sortie si spécifié
-    if args.output != OUTPUT_CSV:
+    # Générer le nom du fichier CSV automatiquement si non spécifié
+    if args.output == OUTPUT_CSV:
+        # Construire le nom du fichier avec catégorie et date/heure
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        if args.categories and len(args.categories) > 0:
+            # Utiliser le nom de la première catégorie (ou toutes si plusieurs)
+            if len(args.categories) == 1:
+                category_slug = slugify(args.categories[0])
+                OUTPUT_CSV = f"shopify_import_{category_slug}_{timestamp}.csv"
+            else:
+                # Plusieurs catégories : utiliser "multi" ou les premières lettres
+                category_slug = "_".join([slugify(cat)[:10] for cat in args.categories[:3]])
+                OUTPUT_CSV = f"shopify_import_{category_slug}_{timestamp}.csv"
+        else:
+            # Pas de catégorie spécifiée : utiliser le nom de base + date/heure
+            base_name = OUTPUT_CSV.replace('.csv', '') if OUTPUT_CSV.endswith('.csv') else OUTPUT_CSV
+            OUTPUT_CSV = f"{base_name}_{timestamp}.csv"
+    else:
+        # Utiliser le nom spécifié par l'utilisateur (tel quel, sans modification)
         OUTPUT_CSV = args.output
     
     logger.info("Démarrage du scraper...")
+    logger.info(f"Fichier CSV de sortie: {OUTPUT_CSV}")
     driver = None
     
     try:
