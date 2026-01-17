@@ -1,0 +1,10 @@
+# Dépendances supplémentaires pour l'interface graphique
+customtkinter>=5.2.0
+pyinstaller>=6.0.0
+Pillow>=10.0.0
+
+# Dépendances pour l'éditeur IA
+openai>=1.0.0
+anthropic>=0.18.0
+google-genai>=0.2.0
+

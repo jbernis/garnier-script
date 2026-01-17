@@ -30,3 +30,13 @@ Thumbs.db
 # Variables d'environnement (credentials)
 .env
 
+# Configuration de l'application (commenté pour inclure dans GitHub)
+# app_config.json
+
+# PyInstaller
+build/
+dist/
+*.app
+*.dmg
+# Note: creation-build/build.spec est nécessaire, donc on ne l'exclut pas
+

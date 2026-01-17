@@ -1,0 +1,9 @@
+{
+  "delete_outputs_on_close": false,
+  "database_paths": {
+    "garnier": "database/garnier_products.db",
+    "artiga": "database/artiga_products.db",
+    "cristel": "database/cristel_products.db",
+    "ai_prompts": "database/ai_prompts.db"
+  }
+}

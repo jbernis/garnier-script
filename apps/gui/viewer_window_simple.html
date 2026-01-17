@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Test Visualiseur</title>
+    <style>
+        body { background: #212121; color: #fff; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; border: 1px solid #444; }
+        th { background: #1f538d; }
+    </style>
+</head>
+<body>
+    <h1>Test - Produits chargés: <span id="count">0</span></h1>
+    <table id="productTable">
+        <thead>
+            <tr><th>Handle</th><th>Titre</th><th>Vendor</th></tr>
+        </thead>
+        <tbody id="productTableBody"></tbody>
+    </table>
+    <script>
+        let productsData = {products_json};
+        console.log('Produits:', Object.keys(productsData).length);
+        document.getElementById('count').textContent = Object.keys(productsData).length;
+        const tbody = document.getElementById('productTableBody');
+        Object.values(productsData).forEach(product => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = '<td>' + (product.handle || '') + '</td><td>' + (product.title || '') + '</td><td>' + (product.vendor || '') + '</td>';
+            tbody.appendChild(tr);
+        });
+    </script>
+</body>
+</html>
+

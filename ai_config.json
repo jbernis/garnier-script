@@ -1,0 +1,52 @@
+{
+  "google_shopping_fields": {
+    "enabled": true,
+    "fields": {
+      "SEO Title": true,
+      "SEO Description": true,
+      "Google Shopping / Google Product Category": true,
+      "Google Shopping / Gender": false,
+      "Google Shopping / Age Group": false,
+      "Google Shopping / MPN": true,
+      "Google Shopping / Condition": true,
+      "Google Shopping / Custom Product": false,
+      "Google Shopping / Custom Label 0": false,
+      "Google Shopping / Custom Label 1": false,
+      "Google Shopping / Custom Label 2": false,
+      "Google Shopping / Custom Label 3": false,
+      "Google Shopping / Custom Label 4": false
+    },
+    "default_prompts": {
+      "SEO Title": "Génère un titre SEO optimisé de maximum 60 caractères pour ce produit e-commerce. Le titre doit être accrocheur, inclure les mots-clés principaux et inciter au clic.",
+      "SEO Description": "Génère une description SEO optimisée de maximum 160 caractères pour ce produit e-commerce. La description doit être persuasive, inclure les avantages principaux et un appel à l'action.",
+      "Google Shopping / Google Product Category": "Détermine la catégorie Google Shopping appropriée selon la taxonomie officielle Google Product Taxonomy. Réponds uniquement avec le chemin de catégorie complet (ex: 'Apparel & Accessories > Clothing > Shirts & Tops').",
+      "Google Shopping / MPN": "Détermine le MPN (Manufacturer Part Number) de ce produit. Si le SKU ou le code-barres est disponible, utilise-le. Sinon, réponds avec 'N/A'.",
+      "Google Shopping / Condition": "Détermine la condition du produit. Réponds uniquement avec une de ces valeurs: 'new', 'refurbished', 'used'. Par défaut, utilise 'new'."
+    }
+  },
+  "ai_providers": {
+    "default": "openai",
+    "available": ["openai", "claude", "gemini"],
+    "models": {
+      "openai": {
+        "default": "gpt-4o-mini",
+        "available": ["gpt-4o-mini", "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
+      },
+      "claude": {
+        "default": "claude-haiku-4-5-20251001",
+        "available": ["claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
+      },
+      "gemini": {
+        "default": "gemini-1.5-flash",
+        "available": ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp", "gemini-pro", "gemini-pro-vision"]
+      }
+    }
+  },
+  "processing": {
+    "rate_limit_delay": 1.0,
+    "max_retries": 3,
+    "retry_delay": 2.0,
+    "timeout": 30.0
+  }
+}
+
