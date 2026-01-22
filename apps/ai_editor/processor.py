@@ -475,11 +475,28 @@ class CSVAIProcessor:
                 )
             
             if selected_fields.get('google_category', False):
+                # Google Shopping utilise TOUJOURS Gemini (plus performant pour la catégorisation)
+                gemini_api_key = self.db.get_ai_credentials('gemini')
+                if not gemini_api_key:
+                    raise ValueError("Credentials Gemini non trouvés. Google Shopping nécessite Gemini.")
+                
+                # Récupérer le modèle Gemini sauvegardé en base
+                gemini_model = self.db.get_ai_model('gemini') or 'gemini-2.0-flash-exp'
+                
+                gemini_provider = get_provider(
+                    'gemini',
+                    api_key=gemini_api_key,
+                    model=gemini_model
+                )
+                
                 agents['google_category'] = GoogleShoppingAgent(
-                    ai_provider,
+                    gemini_provider,
                     prompt_set['system_prompt'],
                     prompt_set['google_category_prompt']
                 )
+                
+                if log_callback:
+                    log_callback(f"🤖 Google Shopping: Gemini ({gemini_model})")
             
             if selected_fields.get('seo', False):
                 agents['seo'] = SEOAgent(
@@ -487,6 +504,9 @@ class CSVAIProcessor:
                     prompt_set['system_prompt'],
                     prompt_set['seo_prompt']
                 )
+                
+                if log_callback:
+                    log_callback(f"🤖 SEO: {provider_name.capitalize()} ({model_name})")
             
             if not agents:
                 raise ValueError("Aucun champ sélectionné pour le traitement")
@@ -689,6 +709,21 @@ class CSVAIProcessor:
             
             # Créer les agents
             from apps.ai_editor.agents import SEOAgent, GoogleShoppingAgent
+            
+            # Google Shopping utilise TOUJOURS Gemini
+            gemini_api_key = self.db.get_ai_credentials('gemini')
+            if not gemini_api_key:
+                raise ValueError("Credentials Gemini non trouvés. Google Shopping nécessite Gemini.")
+            
+            # Récupérer le modèle Gemini sauvegardé en base
+            gemini_model = self.db.get_ai_model('gemini') or 'gemini-2.0-flash-exp'
+            
+            gemini_provider = get_provider(
+                'gemini',
+                api_key=gemini_api_key,
+                model=gemini_model
+            )
+            
             agents = {
                 'seo': SEOAgent(
                     ai_provider,
@@ -696,11 +731,15 @@ class CSVAIProcessor:
                     prompt_set['seo_prompt']
                 ),
                 'google_shopping': GoogleShoppingAgent(
-                    ai_provider,
+                    gemini_provider,
                     prompt_set['google_shopping_system_prompt'],
                     prompt_set['google_category_prompt']
                 )
             }
+            
+            if log_callback:
+                log_callback(f"🤖 SEO: {provider_name.capitalize()} ({model_name})")
+                log_callback(f"🤖 Google Shopping: Gemini ({gemini_model})")
             
             # Traiter le produit
             changes_dict = self.process_batch(
