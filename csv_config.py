@@ -78,16 +78,19 @@ DEFAULT_CONFIG = {
         'columns': SHOPIFY_ALL_COLUMNS.copy(),  # Tous les champs par défaut
         'handle_source': 'barcode',  # Par défaut: barcode
         'vendor': 'Garnier-Thiebaut',
+        'location': 'Dropshipping Garnier-Thiebaut',
     },
     'artiga': {
         'columns': SHOPIFY_ALL_COLUMNS.copy(),
         'handle_source': 'barcode',
         'vendor': 'Artiga',
+        'location': 'Dropshipping Artiga',
     },
     'cristel': {
         'columns': SHOPIFY_ALL_COLUMNS.copy(),
         'handle_source': 'barcode',
         'vendor': 'Cristel',
+        'location': 'Dropshipping Cristel',
     },
 }
 
@@ -282,6 +285,30 @@ class CSVConfig:
         if supplier == 'commun':
             return 'Commun (s\'applique à tous les fournisseurs)'
         return self._get_effective_config(supplier)['vendor']
+    
+    def get_location(self, supplier: str) -> str:
+        """
+        Retourne l'emplacement (location) pour un fournisseur donné.
+        Par défaut: "Dropshipping {Fournisseur}"
+        """
+        supplier = supplier.lower()
+        if supplier == 'commun':
+            return 'Dropshipping Commun'
+        
+        config = self._get_effective_config(supplier)
+        if 'location' in config and config['location']:
+            return config['location']
+        
+        # Par défaut, "Dropshipping {Fournisseur}"
+        return f"Dropshipping {supplier.capitalize()}"
+    
+    def set_location(self, supplier: str, location: str):
+        """Définit l'emplacement (location) pour un fournisseur donné."""
+        supplier = supplier.lower()
+        if supplier not in self.config:
+            self.config[supplier] = DEFAULT_CONFIG.get(supplier, {}).copy()
+        self.config[supplier]['location'] = location
+        self._save_config(self.config)
     
     def reset_to_default(self, supplier: Optional[str] = None):
         """Réinitialise la configuration à ses valeurs par défaut."""

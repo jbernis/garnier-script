@@ -1,5 +1,5 @@
 """
-Module de génération CSV avec gestion de csv_config.json.
+Module de génération CSV avec gestion de csv_generator_config.json.
 """
 
 import json
@@ -16,25 +16,30 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from csv_config import CONFIG_FILE, SHOPIFY_ALL_COLUMNS
+from apps.csv_generator.csv_generator_config import get_csv_generator_config
 
 
 class CSVGenerator:
-    """Générateur CSV avec gestion temporaire de csv_config.json."""
+    """Générateur CSV avec configuration dédiée csv_generator_config.json."""
     
     def __init__(self):
         """Initialise le générateur CSV."""
-        self.config_file = Path(CONFIG_FILE)
-        self.backup_file = Path(str(CONFIG_FILE) + ".backup")
+        self.generator_config = get_csv_generator_config()
+        # Fichier temporaire pour la génération (passé aux scripts de génération)
+        self.temp_config_file = Path(CONFIG_FILE).parent / 'csv_config_temp.json'
     
     def generate_csv(
         self,
         supplier: str,
         categories: Optional[List[str]],
+        subcategories: Optional[List[str]],
         selected_fields: List[str],
         handle_source: str,
         vendor: str,
+        location: Optional[str] = None,
         gamme: Optional[str] = None,
-        output_file: Optional[str] = None
+        output_file: Optional[str] = None,
+        max_images: Optional[int] = None
     ) -> str:
         """
         Génère un CSV Shopify avec les champs sélectionnés.
@@ -42,11 +47,14 @@ class CSVGenerator:
         Args:
             supplier: Nom du fournisseur (ex: 'garnier')
             categories: Liste de catégories à inclure (None = toutes)
+            subcategories: Liste de sous-catégories à inclure (optionnel, pour Artiga/Cristel)
             selected_fields: Liste des champs CSV à inclure
             handle_source: Source du Handle ('barcode', 'sku', 'title', 'custom')
             vendor: Nom du vendor
+            location: Emplacement (location) pour le stock
             gamme: Nom de la gamme à filtrer (optionnel, pour Garnier)
             output_file: Chemin du fichier CSV de sortie (None = auto)
+            max_images: Nombre maximum d'images par produit (None = toutes)
             
         Returns:
             Chemin du CSV généré
@@ -54,18 +62,17 @@ class CSVGenerator:
         Raises:
             Exception: Si la génération échoue
         """
-        # Sauvegarder la configuration actuelle
-        self._backup_config()
-        
         try:
-            # Modifier csv_config.json temporairement
-            self._modify_config(supplier, selected_fields, handle_source, vendor)
+            # Créer un fichier de configuration temporaire pour la génération
+            self._create_temp_config(supplier, selected_fields, handle_source, vendor, location)
             
             # Appeler la fonction de génération
             if supplier == 'garnier':
                 # Importer le module de génération
                 import importlib.util
-                generate_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scraper-garnier-generate-csv.py")
+                # Remonter jusqu'à la racine du projet (apps/csv_generator -> apps -> racine)
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                generate_path = os.path.join(project_root, "garnier", "scraper-generate-csv.py")
                 generate_spec = importlib.util.spec_from_file_location("scraper_garnier_generate_csv", generate_path)
                 generate_module = importlib.util.module_from_spec(generate_spec)
                 generate_spec.loader.exec_module(generate_module)
@@ -79,8 +86,6 @@ class CSVGenerator:
                 if not output_file:
                     from datetime import datetime
                     from garnier.scraper_garnier_module import slugify
-                    # Importer la fonction de nettoyage pour les gammes
-                    from garnier.garnier_functions import clean_gamme_name
                     
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     output_dir = os.getenv("GARNIER_OUTPUT_DIR", "outputs/garnier")
@@ -88,10 +93,9 @@ class CSVGenerator:
                     # Construire le nom du fichier
                     name_parts = []
                     if gamme:
-                        # Nettoyer le nom de la gamme avant de créer le slug
-                        cleaned_gamme = clean_gamme_name(gamme)
-                        if cleaned_gamme:
-                            name_parts.append(slugify(cleaned_gamme))
+                        # Utiliser le nom de la gamme tel quel (déjà propre depuis l'URL)
+                        if gamme.strip():
+                            name_parts.append(slugify(gamme))
                     if categories:
                         category_slugs = [slugify(cat) for cat in categories]
                         name_parts.extend(category_slugs)
@@ -118,7 +122,8 @@ class CSVGenerator:
                     output_db=db_path,
                     supplier=supplier,
                     categories=categories,
-                    gamme=gamme
+                    gamme=gamme,
+                    max_images=max_images
                 )
                 
                 # Vérifier que le fichier existe
@@ -126,41 +131,115 @@ class CSVGenerator:
                     raise ValueError(f"Le fichier CSV généré n'existe pas: {output_file}")
                 
                 return output_file
+            elif supplier == 'artiga':
+                # Importer le module de génération
+                import importlib.util
+                # Remonter jusqu'à la racine du projet (apps/csv_generator -> apps -> racine)
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                generate_path = os.path.join(project_root, "artiga", "scraper-generate-csv.py")
+                generate_spec = importlib.util.spec_from_file_location("scraper_artiga_generate_csv", generate_path)
+                generate_module = importlib.util.module_from_spec(generate_spec)
+                generate_spec.loader.exec_module(generate_module)
+                generate_csv_from_db = generate_module.generate_csv_from_db
+                
+                from utils.app_config import get_artiga_db_path
+                
+                db_path = get_artiga_db_path()
+                
+                # Laisser scraper-generate-csv.py construire le nom du fichier
+                # Il utilisera subcategory pour le nom si fourni
+                print(f"[ARTIGA CSV] Appel avec subcategories: {subcategories}, categories: {categories}")
+                
+                # Forcer le rechargement de la configuration avant la génération
+                from csv_config import get_csv_config
+                csv_config_manager = get_csv_config()
+                csv_config_manager.reload_config()
+                
+                logger.info("Configuration rechargée, vérification des colonnes:")
+                loaded_columns = csv_config_manager.get_columns(supplier)
+                logger.info(f"  Colonnes chargées: {len(loaded_columns)}")
+                logger.info(f"  Premières colonnes: {loaded_columns[:5]}")
+                
+                # Appeler la fonction de génération avec subcategory
+                # Pour Artiga, les sous-catégories sont stockées dans le champ "subcategory"
+                # Si subcategories est fourni, utiliser le premier élément comme subcategory
+                # NE PAS passer output_file pour que le script génère le nom avec subcategory
+                output_file = generate_csv_from_db(
+                    output_file=None,  # Laisser le script générer le nom
+                    output_db=db_path,
+                    supplier=supplier,
+                    categories=categories,
+                    subcategory=subcategories[0] if subcategories and len(subcategories) > 0 else None,
+                    max_images=max_images
+                )
+                
+                # Vérifier que le fichier existe
+                if not output_file or not os.path.exists(output_file):
+                    raise ValueError(f"Le fichier CSV généré n'existe pas: {output_file}")
+                
+                return output_file
+            elif supplier == 'cristel':
+                # Importer le module de génération
+                import importlib.util
+                # Remonter jusqu'à la racine du projet (apps/csv_generator -> apps -> racine)
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                generate_path = os.path.join(project_root, "cristel", "scraper-generate-csv.py")
+                generate_spec = importlib.util.spec_from_file_location("scraper_cristel_generate_csv", generate_path)
+                generate_module = importlib.util.module_from_spec(generate_spec)
+                generate_spec.loader.exec_module(generate_module)
+                generate_csv_from_db = generate_module.generate_csv_from_db
+                
+                from utils.app_config import get_cristel_db_path
+                
+                db_path = get_cristel_db_path()
+                
+                # Laisser scraper-generate-csv.py construire le nom du fichier
+                # Il utilisera subcategory pour le nom si fourni
+                print(f"[CRISTEL CSV] Appel avec subcategories: {subcategories}, categories: {categories}")
+                
+                # Forcer le rechargement de la configuration avant la génération
+                from csv_config import get_csv_config
+                csv_config_manager = get_csv_config()
+                csv_config_manager.reload_config()
+                
+                logger.info("Configuration rechargée, vérification des colonnes:")
+                loaded_columns = csv_config_manager.get_columns(supplier)
+                logger.info(f"  Colonnes chargées: {len(loaded_columns)}")
+                logger.info(f"  Premières colonnes: {loaded_columns[:5]}")
+                
+                # Appeler la fonction de génération avec subcategory
+                # Pour Cristel, les sous-catégories sont stockées dans le champ "subcategory"
+                # Si subcategories est fourni, utiliser le premier élément comme subcategory
+                # NE PAS passer output_file pour que le script génère le nom avec subcategory
+                output_file = generate_csv_from_db(
+                    output_file=None,  # Laisser le script générer le nom
+                    output_db=db_path,
+                    supplier=supplier,
+                    categories=categories,
+                    subcategory=subcategories[0] if subcategories and len(subcategories) > 0 else None,
+                    max_images=max_images
+                )
+                
+                # Vérifier que le fichier existe
+                if not output_file or not os.path.exists(output_file):
+                    raise ValueError(f"Le fichier CSV généré n'existe pas: {output_file}")
+                
+                return output_file
             else:
                 raise ValueError(f"Fournisseur '{supplier}' non supporté pour l'instant")
         
         finally:
-            # Toujours restaurer la configuration
-            self._restore_config()
+            # Nettoyer le fichier de configuration temporaire
+            self._cleanup_temp_config()
     
-    def _backup_config(self):
-        """Sauvegarde csv_config.json dans un fichier backup."""
-        if self.config_file.exists():
-            try:
-                shutil.copy2(self.config_file, self.backup_file)
-                logger.debug(f"Configuration sauvegardée: {self.backup_file}")
-            except Exception as e:
-                logger.error(f"Erreur lors de la sauvegarde de la configuration: {e}")
-                raise
-    
-    def _restore_config(self):
-        """Restaure csv_config.json depuis le backup."""
-        if self.backup_file.exists():
-            try:
-                shutil.copy2(self.backup_file, self.config_file)
-                self.backup_file.unlink()  # Supprimer le backup
-                logger.debug("Configuration restaurée")
-            except Exception as e:
-                logger.error(f"Erreur lors de la restauration de la configuration: {e}")
-                # Ne pas lever d'exception pour ne pas masquer l'erreur originale
-    
-    def _modify_config(self, supplier: str, selected_fields: List[str], 
-                      handle_source: str, vendor: str):
-        """Modifie csv_config.json avec les paramètres sélectionnés."""
+    def _create_temp_config(self, supplier: str, selected_fields: List[str], 
+                           handle_source: str, vendor: str, location: Optional[str] = None):
+        """Crée un fichier de configuration temporaire pour la génération."""
         try:
-            # Charger la configuration actuelle
-            if self.config_file.exists():
-                with open(self.config_file, 'r', encoding='utf-8') as f:
+            # Charger la configuration de base depuis csv_config.json
+            config_file = Path(CONFIG_FILE)
+            if config_file.exists():
+                with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
             else:
                 config = {}
@@ -172,23 +251,50 @@ class CSVGenerator:
             # Mettre à jour les colonnes sélectionnées
             config[supplier]['columns'] = selected_fields.copy()
             
-            # Mettre à jour handle_source et vendor
+            # Mettre à jour handle_source, vendor et location
             config[supplier]['handle_source'] = handle_source
             config[supplier]['vendor'] = vendor
+            config[supplier]['location'] = location if location is not None else f"Dropshipping {supplier.capitalize()}"
             
-            # Sauvegarder la configuration modifiée
-            with open(self.config_file, 'w', encoding='utf-8') as f:
+            # Sauvegarder la configuration temporaire
+            with open(self.temp_config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2, ensure_ascii=False)
             
-            logger.info(f"Configuration modifiée pour {supplier}:")
+            # Remplacer temporairement csv_config.json par le fichier temporaire
+            config_file_backup = Path(str(config_file) + ".backup_gen")
+            if config_file.exists():
+                shutil.copy2(config_file, config_file_backup)
+            shutil.copy2(self.temp_config_file, config_file)
+            
+            logger.info(f"Configuration temporaire créée pour {supplier}:")
             logger.info(f"  - Champs sélectionnés: {len(selected_fields)}")
             logger.info(f"  - Handle source: {handle_source}")
             logger.info(f"  - Vendor: {vendor}")
-            logger.info(f"  - Colonnes: {selected_fields[:5]}{'...' if len(selected_fields) > 5 else ''}")
+            logger.info(f"  - Location: {location or f'Dropshipping {supplier.capitalize()}'}")
             
         except Exception as e:
-            logger.error(f"Erreur lors de la modification de la configuration: {e}")
+            logger.error(f"Erreur lors de la création de la configuration temporaire: {e}")
             raise
+    
+    def _cleanup_temp_config(self):
+        """Nettoie le fichier de configuration temporaire et restaure l'original."""
+        try:
+            config_file = Path(CONFIG_FILE)
+            config_file_backup = Path(str(config_file) + ".backup_gen")
+            
+            # Restaurer l'original
+            if config_file_backup.exists():
+                shutil.copy2(config_file_backup, config_file)
+                config_file_backup.unlink()
+            
+            # Supprimer le fichier temporaire
+            if self.temp_config_file.exists():
+                self.temp_config_file.unlink()
+            
+            logger.debug("Configuration temporaire nettoyée")
+        except Exception as e:
+            logger.error(f"Erreur lors du nettoyage de la configuration temporaire: {e}")
+            # Ne pas lever d'exception pour ne pas masquer l'erreur originale
     
     def get_available_suppliers(self) -> List[str]:
         """
@@ -208,24 +314,23 @@ class CSVGenerator:
         except Exception:
             pass
         
-        # TODO: Ajouter d'autres fournisseurs quand leurs bases de données seront disponibles
         # Vérifier Cristel
-        # try:
-        #     from utils.app_config import get_cristel_db_path
-        #     db_path = get_cristel_db_path()
-        #     if Path(db_path).exists():
-        #         suppliers.append('cristel')
-        # except Exception:
-        #     pass
+        try:
+            from utils.app_config import get_cristel_db_path
+            db_path = get_cristel_db_path()
+            if Path(db_path).exists():
+                suppliers.append('cristel')
+        except Exception:
+            pass
         
         # Vérifier Artiga
-        # try:
-        #     from utils.app_config import get_artiga_db_path
-        #     db_path = get_artiga_db_path()
-        #     if Path(db_path).exists():
-        #         suppliers.append('artiga')
-        # except Exception:
-        #     pass
+        try:
+            from utils.app_config import get_artiga_db_path
+            db_path = get_artiga_db_path()
+            if Path(db_path).exists():
+                suppliers.append('artiga')
+        except Exception:
+            pass
         
         return suppliers
     
@@ -251,8 +356,70 @@ class CSVGenerator:
             except Exception as e:
                 logger.error(f"Erreur lors de la récupération des catégories Garnier: {e}")
                 return []
+        elif supplier == 'artiga':
+            try:
+                from utils.artiga_db import ArtigaDB
+                from utils.app_config import get_artiga_db_path
+                
+                db = ArtigaDB(get_artiga_db_path())
+                categories = db.get_available_categories()
+                db.close()
+                return categories
+            except Exception as e:
+                logger.error(f"Erreur lors de la récupération des catégories Artiga: {e}")
+                return []
+        elif supplier == 'cristel':
+            try:
+                from utils.cristel_db import CristelDB
+                from utils.app_config import get_cristel_db_path
+                
+                db = CristelDB(get_cristel_db_path())
+                categories = db.get_available_categories()
+                db.close()
+                return categories
+            except Exception as e:
+                logger.error(f"Erreur lors de la récupération des catégories Cristel: {e}")
+                return []
         else:
-            # TODO: Ajouter d'autres fournisseurs
+            return []
+    
+    def get_subcategories(self, supplier: str, category: Optional[str] = None) -> List[str]:
+        """
+        Récupère les sous-catégories disponibles pour un fournisseur.
+        
+        Args:
+            supplier: Nom du fournisseur
+            category: Catégorie pour laquelle récupérer les sous-catégories (optionnel)
+            
+        Returns:
+            Liste des sous-catégories disponibles
+        """
+        if supplier == 'artiga':
+            try:
+                from utils.artiga_db import ArtigaDB
+                from utils.app_config import get_artiga_db_path
+                
+                db = ArtigaDB(get_artiga_db_path())
+                subcategories = db.get_available_subcategories(category)
+                db.close()
+                return subcategories
+            except Exception as e:
+                logger.error(f"Erreur lors de la récupération des sous-catégories Artiga: {e}")
+                return []
+        elif supplier == 'cristel':
+            try:
+                from utils.cristel_db import CristelDB
+                from utils.app_config import get_cristel_db_path
+                
+                db = CristelDB(get_cristel_db_path())
+                subcategories = db.get_available_subcategories(category)
+                db.close()
+                return subcategories
+            except Exception as e:
+                logger.error(f"Erreur lors de la récupération des sous-catégories Cristel: {e}")
+                return []
+        else:
+            # Garnier n'a pas de sous-catégories
             return []
     
     def get_gammes(self, supplier: str) -> List[str]:
@@ -283,31 +450,38 @@ class CSVGenerator:
     
     def get_current_config(self, supplier: str) -> dict:
         """
-        Récupère la configuration actuelle pour un fournisseur.
+        Récupère la configuration actuelle pour un fournisseur depuis csv_generator_config.
         
         Args:
             supplier: Nom du fournisseur
             
         Returns:
-            Dictionnaire avec 'columns', 'handle_source', 'vendor'
+            Dictionnaire avec 'columns', 'handle_source', 'vendor', 'location', 'categories', 'subcategories'
         """
         try:
-            from csv_config import get_csv_config
-            
-            csv_config_manager = get_csv_config()
-            columns = csv_config_manager.get_columns(supplier)
-            handle_source = csv_config_manager.get_handle_source(supplier)
-            vendor = csv_config_manager.get_vendor(supplier)
+            # Utiliser la configuration du générateur
+            columns = self.generator_config.get_columns(supplier)
+            handle_source = self.generator_config.get_handle_source(supplier)
+            vendor = self.generator_config.get_vendor(supplier)
+            location = self.generator_config.get_location(supplier)
+            categories = self.generator_config.get_categories(supplier)
+            subcategories = self.generator_config.get_subcategories(supplier)
             
             return {
                 'columns': columns,
                 'handle_source': handle_source,
-                'vendor': vendor
+                'vendor': vendor,
+                'location': location,
+                'categories': categories,
+                'subcategories': subcategories
             }
         except Exception as e:
             logger.error(f"Erreur lors de la récupération de la configuration: {e}")
             return {
                 'columns': SHOPIFY_ALL_COLUMNS.copy(),
                 'handle_source': 'barcode',
-                'vendor': supplier.capitalize()
+                'vendor': supplier.capitalize(),
+                'location': f"Dropshipping {supplier.capitalize()}",
+                'categories': None,
+                'subcategories': None
             }

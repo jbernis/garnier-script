@@ -128,77 +128,94 @@ def process_variant(variant_id, code_vl, url, db, driver, session, headless=True
             
             # Attendre que l'URL spécifique du variant soit accessible avant de continuer (vérifie toutes les 30s jusqu'à obtenir 200)
             logger.info(f"Vérification de l'accessibilité de l'URL du variant: {url}")
-            wait_for_url_accessible(session, url, check_interval=30, timeout=300)  # 5 minutes
-            
-            logger.info(f"URL du variant accessible, reprise de l'extraction pour le variant {code_vl}...")
-            
-            # Réessayer l'extraction maintenant que l'URL du variant est accessible
-            try:
-                db.mark_variant_processing(variant_id)  # Remettre en traitement
+            if wait_for_url_accessible(session, url, check_interval=30, timeout=300):  # 5 minutes
+                logger.info(f"URL du variant accessible (code 200 détecté), ré-authentification avant reprise...")
                 
-                # Extraire les données du variant (retourne aussi driver et session mis à jour)
-                variant_data, driver, session = extract_variant_data_from_url(
-                    driver, session, url, code_vl, headless=headless
-                )
+                # Ré-authentifier avant de reprendre l'extraction (2ème retry)
+                # car un code 200 peut être retourné même sans authentification
+                try:
+                    logger.info("Ré-authentification en cours...")
+                    driver, session = authenticate(headless=headless)
+                    logger.info("✓ Ré-authentification réussie")
+                except Exception as auth_error:
+                    logger.error(f"Erreur lors de la ré-authentification: {auth_error}")
+                    db.mark_variant_error(variant_id, f"Erreur de ré-authentification: {auth_error}")
+                    return False, driver, session
                 
-                if not variant_data:
-                    raise Exception("Aucune donnée extraite")
+                logger.info(f"Reprise de l'extraction pour le variant {code_vl}...")
+                
+                # Réessayer l'extraction maintenant que l'URL du variant est accessible et qu'on est authentifié
+                try:
+                    db.mark_variant_processing(variant_id)  # Remettre en traitement
                     
-                # Log pour déboguer avant stockage
-                logger.info(f"  Stockage dans DB (retry) - SKU: '{variant_data.get('sku')}', Gencode: '{variant_data.get('gencode')}'")
-                
-                # Validation des données obligatoires
-                sku = variant_data.get('sku')
-                gencode = variant_data.get('gencode')
-                stock = variant_data.get('stock')
-                price_pvc = variant_data.get('price_pvc')
-                
-                # Vérifier que SKU et gencode ne sont pas vides
-                if not sku or not sku.strip():
-                    raise Exception("SKU manquant ou vide après retry")
-                
-                if not gencode or not gencode.strip():
-                    raise Exception("Code-barre (gencode) manquant ou vide après retry")
-                
-                # Vérifier que stock n'est pas None
-                if stock is None:
-                    raise Exception("Stock manquant après retry")
-                
-                # Vérifier que price_pvc n'est pas vide
-                if not price_pvc or not str(price_pvc).strip():
-                    raise Exception("Prix PVC manquant ou vide après retry")
-                
-                # Si validation OK, stocker les données dans la DB
-                db.update_variant_data(
-                    variant_id=variant_id,
-                    sku=sku,
-                    gencode=gencode,
-                    price_pa=variant_data.get('price_pa'),
-                    price_pvc=price_pvc,
-                    stock=stock,
-                    size=variant_data.get('size'),
-                    color=variant_data.get('color'),
-                    material=variant_data.get('material'),
-                    status='completed'
-                )
-                
-                logger.info(f"✓ Variant {code_vl} traité avec succès après reprise (SKU: {sku}, Gencode: {gencode}, Stock: {stock}, Prix PVC: {price_pvc})")
-                
-                # Vérifier si tous les variants du produit sont maintenant traités
-                cursor = db.conn.cursor()
-                cursor.execute('SELECT product_id FROM product_variants WHERE id = ?', (variant_id,))
-                row = cursor.fetchone()
-                if row:
-                    product_id = row['product_id']
-                    db.update_product_status_if_all_variants_processed(product_id)
-                
-                return True, driver, session
+                    # Extraire les données du variant (retourne aussi driver et session mis à jour)
+                    variant_data, driver, session = extract_variant_data_from_url(
+                        driver, session, url, code_vl, headless=headless
+                    )
                     
-            except Exception as retry_error:
-                error_msg = str(retry_error)
-                db.mark_variant_error(variant_id, error_msg)
-                logger.error(f"✗ Erreur persistante pour le variant {code_vl}: {error_msg}")
-            return False, driver, session
+                    if not variant_data:
+                        raise Exception("Aucune donnée extraite")
+                        
+                    # Log pour déboguer avant stockage
+                    logger.info(f"  Stockage dans DB (retry) - SKU: '{variant_data.get('sku')}', Gencode: '{variant_data.get('gencode')}'")
+                    
+                    # Validation des données obligatoires
+                    sku = variant_data.get('sku')
+                    gencode = variant_data.get('gencode')
+                    stock = variant_data.get('stock')
+                    price_pvc = variant_data.get('price_pvc')
+                    
+                    # Vérifier que SKU et gencode ne sont pas vides
+                    if not sku or not sku.strip():
+                        raise Exception("SKU manquant ou vide après retry")
+                    
+                    if not gencode or not gencode.strip():
+                        raise Exception("Code-barre (gencode) manquant ou vide après retry")
+                    
+                    # Vérifier que stock n'est pas None
+                    if stock is None:
+                        raise Exception("Stock manquant après retry")
+                    
+                    # Vérifier que price_pvc n'est pas vide
+                    if not price_pvc or not str(price_pvc).strip():
+                        raise Exception("Prix PVC manquant ou vide après retry")
+                    
+                    # Si validation OK, stocker les données dans la DB
+                    db.update_variant_data(
+                        variant_id=variant_id,
+                        sku=sku,
+                        gencode=gencode,
+                        price_pa=variant_data.get('price_pa'),
+                        price_pvc=price_pvc,
+                        stock=stock,
+                        size=variant_data.get('size'),
+                        color=variant_data.get('color'),
+                        material=variant_data.get('material'),
+                        status='completed'
+                    )
+                    
+                    logger.info(f"✓ Variant {code_vl} traité avec succès après reprise (SKU: {sku}, Gencode: {gencode}, Stock: {stock}, Prix PVC: {price_pvc})")
+                    
+                    # Vérifier si tous les variants du produit sont maintenant traités
+                    cursor = db.conn.cursor()
+                    cursor.execute('SELECT product_id FROM product_variants WHERE id = ?', (variant_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        product_id = row['product_id']
+                        db.update_product_status_if_all_variants_processed(product_id)
+                    
+                    return True, driver, session
+                        
+                except Exception as retry_error:
+                    error_msg = str(retry_error)
+                    db.mark_variant_error(variant_id, error_msg)
+                    logger.error(f"✗ Erreur persistante pour le variant {code_vl}: {error_msg}")
+                    return False, driver, session
+            else:
+                # Timeout : le site n'est toujours pas accessible après 5 minutes
+                logger.error(f"URL du variant toujours inaccessible après le timeout (5 minutes) pour {code_vl}")
+                db.mark_variant_error(variant_id, f"URL inaccessible après timeout: {url}")
+                return False, driver, session
         else:
             # Erreur non liée à l'indisponibilité du site
             db.mark_variant_error(variant_id, error_msg)
@@ -268,9 +285,10 @@ def process_urls(code_vl=None, status='pending', limit=None, retry_errors=False,
         
         logger.info(f"Traitement de {len(variants)} variant(s)...")
         
-        # Traiter chaque variant
+        # Traiter chaque variant avec mécanisme de retry
         success_count = 0
         error_count = 0
+        max_retries = 3
         
         for idx, variant in enumerate(variants, 1):
             variant_id = variant['id']
@@ -279,15 +297,52 @@ def process_urls(code_vl=None, status='pending', limit=None, retry_errors=False,
             
             logger.info(f"\n[{idx}/{len(variants)}] Variant {code_vl}")
             
-            # Traiter le variant (retourne aussi driver et session mis à jour)
-            success, driver, session = process_variant(
-                variant_id, code_vl, url, db, driver, session, headless=headless
-            )
+            # Retry avec ré-authentification au 2ème essai
+            success = False
+            last_error = None
+            
+            for retry_attempt in range(1, max_retries + 1):
+                try:
+                    if retry_attempt > 1:
+                        logger.info(f"  ↻ Retry {retry_attempt}/{max_retries} pour le variant {code_vl}")
+                    
+                    # Ré-authentification au 2ème retry
+                    if retry_attempt == 2:
+                        logger.info(f"    🔐 Ré-authentification avant retry {retry_attempt}...")
+                        try:
+                            driver, session = authenticate(headless=headless)
+                            logger.info(f"    ✓ Ré-authentification réussie")
+                        except Exception as auth_error:
+                            logger.error(f"    ✗ Erreur lors de la ré-authentification: {auth_error}")
+                            last_error = f"Erreur de ré-authentification: {auth_error}"
+                            continue
+                    
+                    # Traiter le variant (retourne aussi driver et session mis à jour)
+                    success, driver, session = process_variant(
+                        variant_id, code_vl, url, db, driver, session, headless=headless
+                    )
+                    
+                    if success:
+                        if retry_attempt > 1:
+                            logger.info(f"    ✓ Retry {retry_attempt} réussi")
+                        break
+                    else:
+                        last_error = "Échec du traitement du variant"
+                        if retry_attempt < max_retries:
+                            logger.warning(f"    ✗ Retry {retry_attempt} échoué, nouvelle tentative...")
+                        
+                except Exception as e:
+                    last_error = str(e)
+                    if retry_attempt < max_retries:
+                        logger.warning(f"    ✗ Retry {retry_attempt} échoué: {e}")
+                    else:
+                        logger.error(f"    ✗ Tous les retries ont échoué ({max_retries} tentatives)")
             
             if success:
                 success_count += 1
             else:
                 error_count += 1
+                logger.error(f"  ✗ Échec définitif pour le variant {code_vl}: {last_error}")
             
             # Petite pause entre les variants pour éviter de surcharger le serveur
             if idx < len(variants):
@@ -296,6 +351,14 @@ def process_urls(code_vl=None, status='pending', limit=None, retry_errors=False,
         # Mettre à jour le status des produits après traitement
         logger.info("\nMise à jour du status des produits...")
         db.update_products_status_after_processing()
+        
+        # Mettre à jour le status des gammes après traitement
+        logger.info("Mise à jour du status des gammes...")
+        if category:
+            affected_gammes = db.update_all_gammes_status(category=category)
+        else:
+            affected_gammes = db.update_all_gammes_status()
+        logger.info(f"✓ {affected_gammes} gamme(s) mise(s) à jour")
         
         # Afficher les statistiques
         stats = db.get_stats()

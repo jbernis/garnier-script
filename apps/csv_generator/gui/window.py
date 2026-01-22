@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from apps.csv_generator.generator import CSVGenerator
 from csv_config import SHOPIFY_ALL_COLUMNS
+from apps.csv_generator.csv_generator_config import get_csv_generator_config
 from gui.progress_window import ProgressWindow
 
 
@@ -36,9 +37,15 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         
         # Variables
         self.generator = CSVGenerator()
+        self.generator_config = get_csv_generator_config()
         self.selected_categories: Set[str] = set()
+        self.selected_subcategories: Set[str] = set()
         self.selected_fields: Set[str] = set()
         self.progress_window: Optional[ProgressWindow] = None
+        
+        # Structures pour les catégories et sous-catégories (comme import_window)
+        self.categories_data = {}  # {category_name: {var, category, subcategories_frame, subcategories}}
+        self.current_supplier_supports_subcategories = False
         
         # Frame principal avec scrollbar
         main_frame = ctk.CTkScrollableFrame(self)
@@ -147,11 +154,18 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         if not value or value == "Aucun fournisseur disponible":
             return
         
+        # Déterminer si le fournisseur supporte les sous-catégories
+        self.current_supplier_supports_subcategories = value in ['artiga', 'cristel']
+        
         # Charger les catégories pour ce fournisseur
         self.load_categories(value)
         
-        # Charger les gammes pour ce fournisseur (si Garnier)
-        self.load_gammes(value)
+        # Afficher/masquer les gammes selon le fournisseur
+        if value == 'garnier':
+            self.gamme_frame.pack(fill="x", padx=20, pady=(0, 10))
+            self.load_gammes(value)
+        else:
+            self.gamme_frame.pack_forget()
         
         # Charger la configuration actuelle pour ce fournisseur
         self.load_current_config(value)
@@ -186,6 +200,9 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         
         self.category_checkboxes: dict = {}
         
+        # Flag pour éviter les boucles infinies lors des mises à jour programmatiques
+        self._updating_checkboxes = False
+        
         self.empty_categories_label = ctk.CTkLabel(
             self.categories_scroll_frame,
             text="Sélectionnez un fournisseur pour voir les catégories",
@@ -201,23 +218,60 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             widget.destroy()
         
         self.category_checkboxes.clear()
+        self.categories_data.clear()
         
         try:
             categories = self.generator.get_categories(supplier)
             
             if categories:
                 if hasattr(self, 'empty_categories_label'):
-                    self.empty_categories_label.destroy()
+                    try:
+                        self.empty_categories_label.destroy()
+                    except:
+                        pass
                 
-                for category in categories:
-                    var = ctk.BooleanVar(value=False)
-                    checkbox = ctk.CTkCheckBox(
-                        self.categories_scroll_frame,
-                        text=category,
-                        variable=var
-                    )
-                    checkbox.pack(anchor="w", pady=2)
-                    self.category_checkboxes[category] = (checkbox, var)
+                # Si le fournisseur supporte les sous-catégories (Artiga/Cristel)
+                if self.current_supplier_supports_subcategories:
+                    for category in categories:
+                        # Créer un frame pour la catégorie avec ses sous-catégories
+                        category_frame = ctk.CTkFrame(self.categories_scroll_frame)
+                        category_frame.pack(fill="x", padx=10, pady=2)
+                        
+                        # Checkbox de la catégorie
+                        var = ctk.BooleanVar(value=False)
+                        checkbox = ctk.CTkCheckBox(
+                            category_frame,
+                            text=category,
+                            variable=var
+                        )
+                        checkbox.pack(anchor="w", padx=0, pady=2)
+                        
+                        # Ajouter un traceur pour gérer la sélection de la catégorie
+                        var.trace_add('write', lambda *args, cat_name=category: self.on_category_checkbox_changed(cat_name))
+                        
+                        # Stocker les données de la catégorie
+                        self.categories_data[category] = {
+                            'var': var,
+                            'category': category,
+                            'category_frame': category_frame,
+                            'subcategories_frame': None,
+                            'subcategories': {}
+                        }
+                        self.category_checkboxes[category] = (checkbox, var)
+                        
+                        # Charger les sous-catégories immédiatement
+                        self.load_subcategories_for_category(supplier, category)
+                else:
+                    # Affichage simple pour Garnier (pas de sous-catégories)
+                    for category in categories:
+                        var = ctk.BooleanVar(value=False)
+                        checkbox = ctk.CTkCheckBox(
+                            self.categories_scroll_frame,
+                            text=category,
+                            variable=var
+                        )
+                        checkbox.pack(anchor="w", padx=10, pady=5)
+                        self.category_checkboxes[category] = (checkbox, var)
             else:
                 self.empty_categories_label = ctk.CTkLabel(
                     self.categories_scroll_frame,
@@ -229,16 +283,146 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         except Exception as e:
             logger.error(f"Erreur lors du chargement des catégories: {e}", exc_info=True)
     
+    def load_subcategories_for_category(self, supplier: str, category: str):
+        """Charge et affiche les sous-catégories pour une catégorie donnée."""
+        if category not in self.categories_data:
+            logger.warning(f"Catégorie {category} non trouvée dans categories_data")
+            return
+        
+        try:
+            subcategories = self.generator.get_subcategories(supplier, category)
+            
+            if not subcategories:
+                logger.info(f"Aucune sous-catégorie pour {category}")
+                return
+            
+            logger.info(f"Chargement de {len(subcategories)} sous-catégories pour {category}")
+            
+            category_data = self.categories_data[category]
+            category_frame = category_data['category_frame']
+            
+            # Créer le frame des sous-catégories
+            subcategories_frame = ctk.CTkFrame(category_frame)
+            subcategories_frame.pack(fill="x", padx=20, pady=(0, 2))
+            category_data['subcategories_frame'] = subcategories_frame
+            
+            # Créer les checkboxes pour les sous-catégories
+            for subcat in subcategories:
+                var = ctk.BooleanVar(value=False)
+                checkbox = ctk.CTkCheckBox(
+                    subcategories_frame,
+                    text=f"└─ {subcat}",
+                    variable=var
+                )
+                checkbox.pack(anchor="w", padx=0, pady=1)
+                
+                # Ajouter un traceur pour gérer la sélection de la sous-catégorie
+                var.trace_add('write', lambda *args, cat_name=category, subcat_name=subcat: 
+                             self.on_subcategory_checkbox_changed(cat_name, subcat_name))
+                
+                category_data['subcategories'][subcat] = {
+                    'var': var,
+                    'subcategory': subcat
+                }
+            
+            logger.info(f"Sous-catégories affichées pour {category}")
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement des sous-catégories pour {category}: {e}", exc_info=True)
+    
+    def on_category_checkbox_changed(self, category_name: str):
+        """Appelé quand la checkbox d'une catégorie change."""
+        if self._updating_checkboxes:
+            return
+        
+        try:
+            if category_name not in self.categories_data:
+                return
+            
+            category_data = self.categories_data[category_name]
+            is_selected = category_data['var'].get()
+            
+            # Si la catégorie est sélectionnée, sélectionner toutes ses sous-catégories
+            if is_selected:
+                if 'subcategories' in category_data and category_data['subcategories']:
+                    self._updating_checkboxes = True
+                    try:
+                        for subcat_name, subcat_data in category_data['subcategories'].items():
+                            if not subcat_data['var'].get():
+                                subcat_data['var'].set(True)
+                    finally:
+                        self._updating_checkboxes = False
+            else:
+                # Si la catégorie est désélectionnée, désélectionner toutes ses sous-catégories
+                if 'subcategories' in category_data and category_data['subcategories']:
+                    self._updating_checkboxes = True
+                    try:
+                        for subcat_name, subcat_data in category_data['subcategories'].items():
+                            if subcat_data['var'].get():
+                                subcat_data['var'].set(False)
+                    finally:
+                        self._updating_checkboxes = False
+        except Exception as e:
+            logger.error(f"Erreur dans on_category_checkbox_changed pour {category_name}: {e}", exc_info=True)
+            self._updating_checkboxes = False
+    
+    def on_subcategory_checkbox_changed(self, category_name: str, subcategory_name: str):
+        """Appelé quand la checkbox d'une sous-catégorie change."""
+        if self._updating_checkboxes:
+            return
+        
+        try:
+            if category_name not in self.categories_data:
+                return
+            
+            category_data = self.categories_data[category_name]
+            if 'subcategories' not in category_data or subcategory_name not in category_data['subcategories']:
+                return
+            
+            subcategory_data = category_data['subcategories'][subcategory_name]
+            is_selected = subcategory_data['var'].get()
+            
+            # Si la sous-catégorie est sélectionnée, sélectionner aussi la catégorie parente
+            if is_selected:
+                if not category_data['var'].get():
+                    self._updating_checkboxes = True
+                    try:
+                        category_data['var'].set(True)
+                    finally:
+                        self._updating_checkboxes = False
+        except Exception as e:
+            logger.error(f"Erreur dans on_subcategory_checkbox_changed pour {category_name} -> {subcategory_name}: {e}", exc_info=True)
+            self._updating_checkboxes = False
+    
     def on_all_categories_changed(self):
         """Appelé quand la checkbox 'Toutes les catégories' change."""
         if self.all_categories_var.get():
-            # Désactiver tous les checkboxes
-            for checkbox, var in self.category_checkboxes.values():
-                checkbox.configure(state="disabled")
+            # Désactiver tous les checkboxes (catégories et sous-catégories)
+            if self.current_supplier_supports_subcategories:
+                for category_name, category_data in self.categories_data.items():
+                    # Trouver le checkbox correspondant
+                    if category_name in self.category_checkboxes:
+                        checkbox, var = self.category_checkboxes[category_name]
+                        checkbox.configure(state="disabled")
+                    # Désactiver aussi les sous-catégories
+                    if 'subcategories' in category_data:
+                        for subcat_name, subcat_data in category_data['subcategories'].items():
+                            # Les checkboxes des sous-catégories sont créés mais pas stockés dans category_checkboxes
+                            # On ne peut pas les désactiver directement, mais ce n'est pas grave
+                            pass
+            else:
+                for checkbox, var in self.category_checkboxes.values():
+                    checkbox.configure(state="disabled")
         else:
             # Activer tous les checkboxes
-            for checkbox, var in self.category_checkboxes.values():
-                checkbox.configure(state="normal")
+            if self.current_supplier_supports_subcategories:
+                for category_name, category_data in self.categories_data.items():
+                    if category_name in self.category_checkboxes:
+                        checkbox, var = self.category_checkboxes[category_name]
+                        checkbox.configure(state="normal")
+            else:
+                for checkbox, var in self.category_checkboxes.values():
+                    checkbox.configure(state="normal")
     
     def load_gammes(self, supplier: str):
         """Charge les gammes pour un fournisseur."""
@@ -272,12 +456,32 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         )
         fields_title.pack(anchor="w", padx=20, pady=(20, 10))
         
-        # Boutons de sélection rapide
+        # Boutons de sélection rapide et sauvegarde
         buttons_frame = ctk.CTkFrame(fields_frame)
         buttons_frame.pack(fill="x", padx=20, pady=(0, 10))
         
         ctk.CTkButton(buttons_frame, text="Tout sélectionner", command=self.select_all_fields, width=120).pack(side="left", padx=5)
         ctk.CTkButton(buttons_frame, text="Tout désélectionner", command=self.deselect_all_fields, width=120).pack(side="left", padx=5)
+        
+        # Bouton de sauvegarde de la configuration
+        self.save_config_button = ctk.CTkButton(
+            buttons_frame, 
+            text="💾 Sauvegarder cette configuration", 
+            command=self.save_field_configuration,
+            width=200,
+            fg_color="green",
+            hover_color="darkgreen"
+        )
+        self.save_config_button.pack(side="right", padx=5)
+        
+        # Label de confirmation de sauvegarde
+        self.save_status_label = ctk.CTkLabel(
+            buttons_frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="green"
+        )
+        self.save_status_label.pack(side="right", padx=10)
         
         # Groupes de champs
         field_groups = {
@@ -380,11 +584,81 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             for field, (checkbox, var) in self.field_checkboxes.items():
                 var.set(field in configured_fields)
             
-            # Mettre à jour handle_source et vendor
+            # Mettre à jour handle_source et location
             self.handle_source_var.set(config.get('handle_source', 'barcode'))
-            self.vendor_var.set(config.get('vendor', supplier.capitalize()))
+            self.location_var.set(config.get('location', f"Dropshipping {supplier.capitalize()}"))
+            
+            # TODO: Restaurer les catégories/sous-catégories sauvegardées si disponibles
+            # saved_categories = config.get('categories')
+            # saved_subcategories = config.get('subcategories')
+            
         except Exception as e:
             logger.error(f"Erreur lors du chargement de la configuration: {e}", exc_info=True)
+    
+    def save_field_configuration(self):
+        """Sauvegarde la configuration actuelle pour le fournisseur."""
+        supplier = self.supplier_var.get()
+        if not supplier or supplier == "Aucun fournisseur disponible":
+            logger.warning("Aucun fournisseur sélectionné")
+            return
+        
+        try:
+            # Récupérer les champs sélectionnés
+            selected_fields = [
+                field for field, (checkbox, var) in self.field_checkboxes.items()
+                if var.get()
+            ]
+            
+            if not selected_fields:
+                logger.warning("Aucun champ sélectionné")
+                self.show_save_status("✗ Aucun champ sélectionné", "red")
+                return
+            
+            # Récupérer les options
+            handle_source = self.handle_source_var.get()
+            location = self.location_var.get().strip()
+            # Permettre de sauvegarder une valeur vide si l'utilisateur le souhaite
+            
+            # Le vendor est toujours le nom du fournisseur capitalisé
+            vendor = supplier.capitalize()
+            
+            # TODO: Récupérer les catégories/sous-catégories sélectionnées
+            # categories = None
+            # subcategories = None
+            
+            # Sauvegarder la configuration
+            self.generator_config.save_full_config(
+                supplier=supplier,
+                columns=selected_fields,
+                handle_source=handle_source,
+                vendor=vendor,
+                location=location
+            )
+            
+            logger.info(f"Configuration sauvegardée pour {supplier}")
+            self.show_save_status(f"✓ Configuration sauvegardée pour {supplier.capitalize()}", "green")
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde de la configuration: {e}", exc_info=True)
+            self.show_save_status(f"✗ Erreur: {str(e)}", "red")
+    
+    def show_save_status(self, message: str, color: str):
+        """Affiche un message de statut de sauvegarde temporaire."""
+        try:
+            if hasattr(self, 'save_status_label') and hasattr(self.save_status_label, 'winfo_exists') and self.save_status_label.winfo_exists():
+                self.save_status_label.configure(text=message, text_color=color)
+                # Faire disparaître le message après 3 secondes
+                self.after(3000, lambda: self._clear_save_status())
+        except Exception as e:
+            logger.error(f"Erreur dans show_save_status: {e}")
+    
+    def _clear_save_status(self):
+        """Efface le message de statut de sauvegarde."""
+        try:
+            if hasattr(self, 'save_status_label') and hasattr(self.save_status_label, 'winfo_exists') and self.save_status_label.winfo_exists():
+                self.save_status_label.configure(text="")
+        except Exception:
+            pass  # Fenêtre fermée, ignorer
     
     # ========== Section 4: Options avancées ==========
     
@@ -416,20 +690,21 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         )
         handle_dropdown.pack(side="left", padx=10)
         
-        # Vendor
-        vendor_frame = ctk.CTkFrame(options_frame)
-        vendor_frame.pack(fill="x", padx=20, pady=(0, 10))
+        # Emplacement (Location)
+        location_frame = ctk.CTkFrame(options_frame)
+        location_frame.pack(fill="x", padx=20, pady=(0, 10))
         
-        vendor_label = ctk.CTkLabel(vendor_frame, text="Vendor:", width=150)
-        vendor_label.pack(side="left", padx=10)
+        location_label = ctk.CTkLabel(location_frame, text="Emplacement:", width=150)
+        location_label.pack(side="left", padx=10)
         
-        self.vendor_var = ctk.StringVar(value="")
-        vendor_entry = ctk.CTkEntry(vendor_frame, textvariable=self.vendor_var, width=300)
-        vendor_entry.pack(side="left", padx=10, fill="x", expand=True)
+        self.location_var = ctk.StringVar(value="")
+        location_entry = ctk.CTkEntry(location_frame, textvariable=self.location_var, width=300)
+        location_entry.pack(side="left", padx=10, fill="x", expand=True)
         
-        # Gamme (pour Garnier uniquement)
+        # Gamme (pour Garnier uniquement) - Caché par défaut
         self.gamme_frame = ctk.CTkFrame(options_frame)
-        self.gamme_frame.pack(fill="x", padx=20, pady=(0, 20))
+        # Ne pas afficher par défaut, sera affiché uniquement pour Garnier
+        # self.gamme_frame.pack(fill="x", padx=20, pady=(0, 20))
         
         gamme_label = ctk.CTkLabel(self.gamme_frame, text="Gamme (optionnel):", width=150)
         gamme_label.pack(side="left", padx=10)
@@ -450,12 +725,40 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         generation_frame = ctk.CTkFrame(parent)
         generation_frame.pack(fill="x", pady=(0, 20))
         
+        # Option pour limiter le nombre d'images
+        max_images_frame = ctk.CTkFrame(generation_frame)
+        max_images_frame.pack(fill="x", padx=20, pady=(20, 10))
+        
+        max_images_label = ctk.CTkLabel(
+            max_images_frame,
+            text="Nombre max d'images par produit:",
+            font=ctk.CTkFont(size=12)
+        )
+        max_images_label.pack(side="left", padx=(10, 10))
+        
+        self.max_images_var = ctk.StringVar(value="")  # Vide = toutes les images
+        max_images_entry = ctk.CTkEntry(
+            max_images_frame,
+            textvariable=self.max_images_var,
+            width=100,
+            placeholder_text="Toutes"
+        )
+        max_images_entry.pack(side="left", padx=(0, 10))
+        
+        max_images_info = ctk.CTkLabel(
+            max_images_frame,
+            text="(vide = toutes, sinon nombre ex: 3)",
+            font=ctk.CTkFont(size=10),
+            text_color="gray"
+        )
+        max_images_info.pack(side="left")
+        
         generate_button = ctk.CTkButton(
             generation_frame,
             text="▶ Générer le CSV",
             command=self.generate_csv,
             width=200,
-            height=40,
+            height=30,
             fg_color="green",
             hover_color="darkgreen"
         )
@@ -479,30 +782,91 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             logger.warning("Sélectionnez au moins un champ CSV")
             return
         
-        # Récupérer les catégories sélectionnées
-        if self.all_categories_var.get():
-            categories = None  # Toutes les catégories
-        else:
-            categories = [
-                category for category, (checkbox, var) in self.category_checkboxes.items()
-                if var.get()
-            ]
-            if not categories:
-                logger.warning("Sélectionnez au moins une catégorie ou cochez 'Toutes les catégories'")
-                return
+        # Récupérer les catégories et sous-catégories sélectionnées
+        categories = None
+        subcategories = None
         
-        # Récupérer les options
+        # Pour les fournisseurs avec sous-catégories, vérifier d'abord si des sous-catégories sont cochées
+        if self.current_supplier_supports_subcategories:
+            selected_categories = []
+            selected_subcategories = []
+            
+            for category_name, category_data in self.categories_data.items():
+                category_selected = category_data['var'].get()
+                
+                # Vérifier les sous-catégories sélectionnées
+                has_selected_subcategories = False
+                if 'subcategories' in category_data:
+                    for subcat_name, subcat_data in category_data['subcategories'].items():
+                        if subcat_data['var'].get():
+                            selected_subcategories.append(subcat_name)
+                            has_selected_subcategories = True
+                
+                # Si la catégorie est sélectionnée mais aucune sous-catégorie, utiliser la catégorie
+                if category_selected and not has_selected_subcategories:
+                    selected_categories.append(category_name)
+            
+            # PRIORITÉ : Si des sous-catégories sont sélectionnées, les utiliser (ignore "Toutes les catégories")
+            if selected_subcategories:
+                subcategories = selected_subcategories
+                categories = None
+                logger.info(f"Sous-catégories sélectionnées: {selected_subcategories}")
+            elif selected_categories:
+                categories = selected_categories
+                subcategories = None
+                logger.info(f"Catégories sélectionnées: {selected_categories}")
+            elif self.all_categories_var.get():
+                # Seulement si rien n'est coché, utiliser "Toutes les catégories"
+                categories = None
+                subcategories = None
+                logger.info("Toutes les catégories sélectionnées")
+            else:
+                logger.warning("Sélectionnez au moins une catégorie ou sous-catégorie")
+                return
+        else:
+            # Pour Garnier (pas de sous-catégories)
+            if not self.all_categories_var.get():
+                categories = [
+                    category for category, (checkbox, var) in self.category_checkboxes.items()
+                    if var.get()
+                ]
+                if not categories:
+                    logger.warning("Sélectionnez au moins une catégorie ou cochez 'Toutes les catégories'")
+                    return
+            else:
+                categories = None  # Toutes les catégories
+        
+        # Récupérer les options        
         handle_source = self.handle_source_var.get()
-        vendor = self.vendor_var.get().strip()
-        if not vendor:
-            vendor = supplier.capitalize()
+        location = self.location_var.get().strip()
+        # Permettre une valeur vide si configurée ainsi
+        
+        # Le vendor est toujours le nom du fournisseur capitalisé
+        vendor = supplier.capitalize()
         
         gamme = self.gamme_var.get().strip() or None
+        
+        # Récupérer le nombre max d'images
+        max_images_str = self.max_images_var.get().strip()
+        max_images = None
+        if max_images_str:
+            try:
+                max_images = int(max_images_str)
+                if max_images <= 0:
+                    logger.warning("Le nombre d'images doit être supérieur à 0")
+                    return
+                logger.info(f"Limitation à {max_images} image(s) par produit")
+            except ValueError:
+                logger.warning("Le nombre d'images doit être un nombre entier")
+                return
         
         # Ouvrir la fenêtre de progression
         self.progress_window = ProgressWindow(self, title="Génération CSV")
         self.progress_window.add_log(f"Génération du CSV pour {supplier}...")
-        self.progress_window.add_log(f"Catégories: {len(categories) if categories else 'Toutes'}")
+        if subcategories:
+            self.progress_window.add_log(f"Sous-catégories: {len(subcategories)}")
+        else:
+            self.progress_window.add_log(f"Catégories: {len(categories) if categories else 'Toutes'}")
         self.progress_window.add_log(f"Champs sélectionnés: {len(selected_fields)}")
         
         def generate_thread():
@@ -510,28 +874,47 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
                 output_path = self.generator.generate_csv(
                     supplier=supplier,
                     categories=categories,
+                    subcategories=subcategories,
                     selected_fields=selected_fields,
                     handle_source=handle_source,
                     vendor=vendor,
-                    gamme=gamme
+                    location=location,
+                    gamme=gamme,
+                    max_images=max_images
                 )
                 
-                self.after(0, lambda path=output_path: self.generation_completed(path))
+                # Vérifier que la fenêtre existe toujours avant de mettre à jour
+                try:
+                    if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                        self.after(0, lambda path=output_path: self.generation_completed(path))
+                except Exception:
+                    pass  # Fenêtre fermée, ignorer
             except Exception as e:
                 error_msg = str(e)
                 logger.error(f"Erreur lors de la génération: {error_msg}", exc_info=True)
-                self.after(0, lambda msg=error_msg: self.generation_error(msg))
+                # Vérifier que la fenêtre existe toujours avant de mettre à jour
+                try:
+                    if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                        self.after(0, lambda msg=error_msg: self.generation_error(msg))
+                except Exception:
+                    pass  # Fenêtre fermée, ignorer
         
         threading.Thread(target=generate_thread, daemon=True).start()
     
     def generation_completed(self, output_path: str):
         """Appelé quand la génération est terminée."""
-        if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
-            self.progress_window.finish(success=True, output_file=output_path)
-            logger.info(f"CSV généré avec succès: {output_path}")
+        try:
+            if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
+                self.progress_window.finish(success=True, output_file=output_path)
+                logger.info(f"CSV généré avec succès: {output_path}")
+        except Exception as e:
+            logger.error(f"Erreur dans generation_completed: {e}")
     
     def generation_error(self, error_msg: str):
         """Appelé en cas d'erreur lors de la génération."""
-        if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
-            self.progress_window.finish(success=False, error=error_msg)
-            logger.error(f"Erreur lors de la génération: {error_msg}")
+        try:
+            if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
+                self.progress_window.finish(success=False, error=error_msg)
+                logger.error(f"Erreur lors de la génération: {error_msg}")
+        except Exception as e:
+            logger.error(f"Erreur dans generation_error: {e}")

@@ -24,56 +24,6 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException
 
 
-def clean_gamme_name(gamme_name_raw: str) -> str:
-    """
-    Nettoie le nom de la gamme Garnier.
-    
-    Format d'entrée: "51469 - LOT H.COUETTE +TAIES ANNABELLE MIMOSAnewPA..."
-    Format de sortie: "ANNABELLE MIMOSA"
-    
-    Args:
-        gamme_name_raw: Nom brut de la gamme
-        
-    Returns:
-        Nom nettoyé de la gamme
-    """
-    if not gamme_name_raw:
-        return ""
-    
-    cleaned = gamme_name_raw.strip()
-    
-    # Étape 1: Enlever tout avant le premier " - " (code numérique)
-    if ' - ' in cleaned:
-        cleaned = cleaned.split(' - ', 1)[1]
-    
-    # Étape 2: Enlever tout à partir de "newPA", "NRPA", ou "PA" (suffixes de prix)
-    # Utiliser une regex pour capturer différentes variantes
-    cleaned = re.sub(r'(NR|new)?PA.*$', '', cleaned, flags=re.IGNORECASE).strip()
-    
-    # Étape 3: Enlever les types de produits courants au début
-    product_types = [
-        r'LOT H\.COUETTE \+TAIES\s+',
-        r'HOUSSE DE COUETTE\s+',
-        r'LOT DE 2 TAIES\s+',
-        r'TAIE D\'OREILLER\s+',
-        r'DRAP HOUSSE B\d+\s+',
-        r'TORCHON\s+',
-        r'CHEMIN DE TABLE\s+',
-        r'NAPPE\s+',
-        r'SERVIETTE\s+',
-        r'SET DE TABLE\s+',
-    ]
-    
-    for ptype in product_types:
-        cleaned = re.sub(ptype, '', cleaned, flags=re.IGNORECASE).strip()
-    
-    # Étape 4: Enlever les espaces multiples
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    
-    # Étape 5: Enlever les prix résiduels (chiffres suivis de €)
-    cleaned = re.sub(r'\s*[\d,.\s]+€.*$', '', cleaned).strip()
-    
-    return cleaned
 
 # Logging - sera configuré par le script principal qui importe ce module
 logger = logging.getLogger(__name__)
@@ -442,21 +392,26 @@ def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session
         return categories
 
 
-def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: requests.Session, category_url: str, start_page: int = 1) -> List[Dict[str, str]]:
+def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: requests.Session, category_url: str, db, category: str, start_page: int = 1) -> List[int]:
     """
-    Extrait les gammes (cartes) d'une catégorie.
+    Extrait les gammes (cartes) d'une catégorie et les écrit directement dans la base de données.
     Gère la pagination pour extraire toutes les gammes de toutes les pages.
-    Retourne la liste des URLs des gammes.
+    Retourne la liste des gamme_ids créés dans la DB.
     
     Args:
         driver: Le driver Selenium
         session: La session requests
         category_url: L'URL de la catégorie
+        db: Instance GarnierDB pour écrire les gammes
+        category: Nom de la catégorie
         start_page: Numéro de page de départ (défaut: 1). Si > 1, la fonction ne recharge pas la page
                     et commence l'extraction à partir de la page actuelle.
+    
+    Returns:
+        List[int]: Liste des gamme_ids créés dans la DB
     """
     logger.info(f"Extraction des gammes de la catégorie...")
-    all_gammes = []
+    all_gamme_ids = []
     page_num = start_page
     max_pages = 100  # Limite de sécurité
     seen_urls = set()
@@ -469,7 +424,9 @@ def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: reques
         # Charger la première page seulement si on commence à la page 1
         # Si start_page > 1, on suppose qu'on est déjà sur la bonne page
         if start_page == 1:
+            logger.info(f"📄 Chargement de la page de catégorie: {category_url}")
             driver.get(category_url)
+            logger.info("⏳ Attente du chargement JavaScript (5 secondes)...")
             time.sleep(5)  # Attendre le chargement JavaScript
         else:
             logger.info(f"Démarrage de l'extraction à partir de la page {start_page} (page déjà chargée)")
@@ -480,17 +437,21 @@ def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: reques
             
             # Faire défiler la page pour charger les cartes dynamiquement
             try:
+                logger.debug(f"📜 Défilement de la page {page_num} pour charger les cartes...")
                 last_height = driver.execute_script("return document.body.scrollHeight")
                 scroll_pause_time = 2
+                scroll_count = 0
                 
                 while True:
                     driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                     time.sleep(scroll_pause_time)
                     new_height = driver.execute_script("return document.body.scrollHeight")
+                    scroll_count += 1
                     if new_height == last_height:
                         break
                     last_height = new_height
                 
+                logger.debug(f"✓ Défilement terminé ({scroll_count} scroll(s))")
                 driver.execute_script("window.scrollTo(0, 0);")
                 time.sleep(2)
             except Exception as e:
@@ -504,7 +465,7 @@ def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: reques
             gamme_cards = soup.find_all(['article', 'div'], class_=re.compile(r'card|gamme|product|item', re.I))
             logger.debug(f"Nombre de cartes trouvées sur la page {page_num}: {len(gamme_cards)}")
             
-            page_gammes = []
+            page_gamme_ids = []
             # Chercher les liens dans ces cartes
             for card in gamme_cards:
                 links = card.find_all('a', href=True)
@@ -513,22 +474,39 @@ def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: reques
                     # Les gammes ne doivent PAS avoir code_vl dans l'URL
                     if href and 'code_vl' not in href and href not in seen_urls:
                         gamme_url = urljoin(BASE_URL, href)
-                        gamme_name_raw = link.get_text(strip=True) or card.get_text(strip=True)[:50]
                         
-                        # Nettoyer le nom de la gamme
-                        gamme_name = clean_gamme_name(gamme_name_raw)
+                        # Extraire le nom de la gamme UNIQUEMENT depuis l'URL (pas de fallback)
+                        gamme_name = None
+                        from urllib.parse import urlparse, unquote
+                        parsed = urlparse(href)
+                        
+                        if 'code_gamme' in parsed.query:
+                            # Extraire depuis le paramètre code_gamme de l'URL
+                            gamme_name = unquote(parsed.query.split('code_gamme=')[1].split('&')[0])
+                            # Remplacer les underscores et tirets par des espaces et normaliser
+                            gamme_name = gamme_name.replace('_', ' ').replace('-', ' ').strip().upper()
+                        
+                        # Si pas de nom depuis l'URL, retourner quand même la gamme avec name=None
+                        # (sera marquée en erreur dans la DB)
+                        if not gamme_name or not gamme_name.strip():
+                            gamme_name = None
+                            logger.debug(f"Nom de gamme non extrait depuis l'URL: {href} (sera marqué en erreur)")
                         
                         # Vérifier que ce n'est pas un lien de navigation ou autre
+                        # Écrire directement dans la DB même si name est None (pour diagnostic)
                         if '/products/' in href or '/product/' in href:
-                            page_gammes.append({
-                                'name': gamme_name,
-                                'url': gamme_url
-                            })
+                            # Écrire la gamme dans la DB et récupérer son ID
+                            gamme_id = db.add_gamme(
+                                url=gamme_url,
+                                category=category,
+                                name=gamme_name  # Peut être None -> status='error'
+                            )
+                            page_gamme_ids.append(gamme_id)
                             seen_urls.add(href)
             
-            # Ajouter les gammes de cette page à la liste totale
-            all_gammes.extend(page_gammes)
-            logger.info(f"Page {page_num}: {len(page_gammes)} gamme(s) trouvée(s)")
+            # Ajouter les gamme_ids de cette page à la liste totale
+            all_gamme_ids.extend(page_gamme_ids)
+            logger.info(f"Page {page_num}: {len(page_gamme_ids)} gamme(s) trouvée(s) et écrite(s) en DB")
             
             # Vérifier s'il y a une page suivante (pagination Garnier avec data-lp)
             next_page_num, next_element = get_next_page_info(driver)
@@ -555,8 +533,8 @@ def get_gammes_from_category(driver: Optional[webdriver.Chrome], session: reques
                 # Pas de page suivante, on arrête
                 break
         
-        logger.info(f"Total: {len(all_gammes)} gamme(s) trouvée(s) sur {page_num} page(s)")
-        return all_gammes
+        logger.info(f"Total: {len(all_gamme_ids)} gamme(s) trouvée(s) et écrite(s) en DB sur {page_num} page(s)")
+        return all_gamme_ids
         
     except Exception as e:
         logger.error(f"Erreur lors de l'extraction des gammes: {e}")
@@ -828,7 +806,9 @@ def get_products_from_gamme(driver: Optional[webdriver.Chrome], session: request
                 href = link.get('href', '')
                 # Chercher les liens avec /product-page/ et code_vl
                 if '/product-page/' in href and 'code_vl=' in href:
-                    code_vl_match = re.search(r'code_vl=(\d+)', href)
+                    # Modifier la regex pour capturer tout le code_vl (chiffres + lettres)
+                    # Exemple: "code_vl=32958B" -> capture "32958B"
+                    code_vl_match = re.search(r'code_vl=([^&\s#]+)', href)
                     if code_vl_match:
                         product_code = code_vl_match.group(1)
                         

@@ -518,11 +518,32 @@ class ViewerWindow(ctk.CTkToplevel):
     def _bring_to_front(self):
         """Amène la fenêtre au premier plan."""
         try:
+            if not hasattr(self, 'winfo_exists') or not self.winfo_exists():
+                return
+            
             self.update_idletasks()
             self.lift()
             self.focus_force()
             self.attributes('-topmost', True)
-            self.after(150, lambda: self.attributes('-topmost', False))
+            self.after(150, lambda: self._reset_topmost())
+        except Exception:
+            pass
+    
+    def _reset_topmost(self):
+        """Désactive l'attribut topmost."""
+        try:
+            if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                self.attributes('-topmost', False)
+        except Exception:
+            pass
+    
+    def _update_html_display(self):
+        """Met à jour l'affichage HTML de manière sécurisée."""
+        try:
+            if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                if self.html_frame:
+                    self.html_frame.update()
+                self.update_idletasks()
         except Exception:
             pass
     
@@ -550,7 +571,7 @@ class ViewerWindow(ctk.CTkToplevel):
             text="📁 Charger un fichier CSV",
             command=self._load_csv_file,
             width=200,
-            height=40,
+            height=30,
             font=ctk.CTkFont(size=14)
         )
         self.load_button.pack(side="right", padx=20, pady=15)
@@ -719,7 +740,7 @@ class ViewerWindow(ctk.CTkToplevel):
             text="💾 Exporter CSV",
             command=self._export_csv,
             width=200,
-            height=40,
+            height=30,
             font=ctk.CTkFont(size=14),
             state="disabled",
             fg_color="green",
@@ -968,10 +989,7 @@ class ViewerWindow(ctk.CTkToplevel):
             self.html_frame.load_file(temp_file_path)
             
             # Forcer la mise à jour de l'affichage après un court délai
-            self.after(100, lambda: (
-                self.html_frame.update() if self.html_frame else None,
-            self.update_idletasks()
-            ))
+            self.after(100, lambda: self._update_html_display())
             
             logger.info(f"HTML chargé dans le WebView pour {len(products_to_display)} produits")
             
@@ -1143,11 +1161,19 @@ class ViewerWindow(ctk.CTkToplevel):
         
         # Vérifier toutes les 500ms pour mettre à jour les sélections
         def monitor():
-            if self.winfo_exists():
-                check_selections()
-                self.after(500, monitor)
+            try:
+                if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                    check_selections()
+                    self.after(500, monitor)
+            except Exception:
+                pass  # Fenêtre fermée, arrêter le monitoring
         
-        self.after(1000, monitor)  # Démarrer après 1 seconde pour laisser le temps au WebView de charger
+        # Démarrer après 1 seconde pour laisser le temps au WebView de charger
+        try:
+            if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                self.after(1000, monitor)
+        except Exception:
+            pass
     
     def _export_csv(self):
         """Exporte le CSV avec uniquement les produits sélectionnés."""

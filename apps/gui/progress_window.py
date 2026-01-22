@@ -126,47 +126,74 @@ class ProgressWindow(ctk.CTkToplevel):
             pass
     
     def update_progress(self, message: str, current: int = 0, total: int = 0):
-        """Met à jour la barre de progression."""
-        if self.is_cancelled:
-            return
-        
-        self.progress_label.configure(text=message)
-        
-        if total > 0:
-            progress = current / total
-            self.progress_bar.set(progress)
-        else:
-            # Mode indéterminé
-            self.progress_bar.set(0.5)
-        
-        self.update()
+        """Met à jour la barre de progression (thread-safe)."""
+        # Planifier l'exécution dans le thread GUI principal
+        self.after(0, self._update_progress_safe, message, current, total)
     
-    def add_log(self, message: str):
-        """Ajoute un message aux logs."""
-        # Vérifier que la fenêtre et le widget existent encore
+    def _update_progress_safe(self, message: str, current: int, total: int):
+        """Met à jour la barre de progression (appelé depuis le thread GUI)."""
         try:
-            if not self.winfo_exists():
-                return
-        except:
-            return
-        
-        # Permettre l'affichage des logs même après annulation (pour les messages d'annulation)
-        try:
-            # Vérifier que le widget existe encore
-            if not hasattr(self, 'log_textbox') or not self.log_textbox.winfo_exists():
+            if self.is_cancelled:
                 return
             
-            # S'assurer que le textbox est en mode normal pour pouvoir écrire
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        
+        # Chaque modification est protégée individuellement
+        try:
+            if hasattr(self, 'progress_label'):
+                self.progress_label.configure(text=message)
+        except Exception:
+            pass
+        
+        try:
+            if hasattr(self, 'progress_bar'):
+                if total > 0:
+                    progress = current / total
+                    self.progress_bar.set(progress)
+                else:
+                    self.progress_bar.set(0.5)
+        except Exception:
+            pass
+        
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+    
+    def add_log(self, message: str):
+        """Ajoute un message aux logs (thread-safe)."""
+        # Planifier l'exécution dans le thread GUI principal
+        try:
+            self.after(0, self._add_log_safe, message)
+        except Exception:
+            # Si after() échoue (fenêtre détruite), afficher dans la console
+            print(f"[LOG] {message}")
+    
+    def _add_log_safe(self, message: str):
+        """Ajoute réellement le message aux logs (appelé depuis le thread GUI)."""
+        try:
+            # Vérifier que la fenêtre et le widget existent encore
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        
+        try:
+            if not hasattr(self, 'log_textbox'):
+                return
+            
+            # Toutes les modifications protégées ensemble
             self.log_textbox.configure(state="normal")
             self.log_textbox.insert("end", f"{message}\n", "yellow_text")
             self.log_textbox.see("end")
-            # Garder en mode normal pour permettre l'édition continue
             self.update_idletasks()
         except Exception as e:
-            # En cas d'erreur, essayer d'afficher dans la console seulement si ce n'est pas une erreur de widget détruit
-            if "invalid command name" not in str(e).lower():
-                print(f"Erreur lors de l'ajout du log: {e}")
-                print(f"Message: {message}")
+            # En cas d'erreur, afficher dans la console seulement si ce n'est pas une erreur de widget détruit
+            if "invalid command name" not in str(e).lower() and "application has been destroyed" not in str(e).lower():
+                print(f"[LOG] {message}")
     
     def close_window(self):
         """Ferme simplement la fenêtre sans affecter le script."""
@@ -177,20 +204,53 @@ class ProgressWindow(ctk.CTkToplevel):
             pass
     
     def cancel(self):
-        """Annule le scraping."""
+        """Annule le scraping (thread-safe)."""
         self.is_cancelled = True
-        if hasattr(self, 'close_button') and self.close_button.winfo_exists():
-            self.close_button.configure(state="disabled", text="Annulation...")
-        self.add_log("Annulation demandée... Arrêt du script en cours...")
-        # Forcer la mise à jour immédiate
-        self.update_idletasks()
+        # Planifier l'exécution dans le thread GUI principal
+        try:
+            self.after(0, self._cancel_safe)
+        except Exception:
+            pass
+    
+    def _cancel_safe(self):
+        """Annulation interne (appelé depuis le thread GUI)."""
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
+        
+        try:
+            if hasattr(self, 'close_button'):
+                self.close_button.configure(state="disabled", text="Annulation...")
+        except Exception:
+            pass
+        
+        try:
+            self._add_log_safe("Annulation demandée... Arrêt du script en cours...")
+        except Exception:
+            pass
+        
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
     
     def enable_manual_close(self):
         """Ne fait rien - la fenêtre se ferme automatiquement après annulation."""
         pass
     
     def finish(self, success: bool, output_file: Optional[str] = None, error: Optional[str] = None):
-        """Termine l'affichage de la progression."""
+        """Termine l'affichage de la progression (thread-safe)."""
+        # Planifier l'exécution dans le thread GUI principal
+        try:
+            self.after(0, self._finish_safe, success, output_file, error)
+        except Exception:
+            # Si after() échoue (fenêtre détruite), ne rien faire
+            pass
+    
+    def _finish_safe(self, success: bool, output_file: Optional[str] = None, error: Optional[str] = None):
+        """Termine l'affichage de la progression (appelé depuis le thread GUI)."""
         # Vérifier que la fenêtre n'a pas été détruite
         try:
             if not self.winfo_exists():
@@ -223,25 +283,24 @@ class ProgressWindow(ctk.CTkToplevel):
             logger.info(f"finish() - success={success}, output_file={output_file}, file_exists={file_exists}, is_cancelled={self.is_cancelled}, error={error}")
             
             if success and not self.is_cancelled:
-                if hasattr(self, 'progress_bar') and self.progress_bar.winfo_exists():
-                    self.progress_bar.set(1.0)
-                if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
-                    self.progress_label.configure(text="Terminé avec succès!")
+                try:
+                    if hasattr(self, 'progress_bar'):
+                        self.progress_bar.set(1.0)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'progress_label'):
+                        self.progress_label.configure(text="Terminé avec succès!")
+                except Exception:
+                    pass
                 
                 if output_file and file_exists:
                     self.add_log(f"\n✓ Fichier généré: {output_file}")
                     try:
                         if hasattr(self, 'download_button'):
-                            try:
-                                if self.download_button.winfo_exists():
-                                    self.download_button.configure(state="normal")
-                                    self.update()  # Forcer la mise à jour de l'interface
-                                    logger.info("Bouton télécharger activé (success=True)")
-                            except Exception:
-                                # Si winfo_exists() échoue, essayer quand même de configurer
-                                self.download_button.configure(state="normal")
-                                self.update()
-                                logger.info("Bouton télécharger activé (success=True, sans winfo_exists)")
+                            self.download_button.configure(state="normal")
+                            self.update()
+                            logger.info("Bouton télécharger activé (success=True)")
                     except Exception as e:
                         logger.error(f"Erreur lors de l'activation du bouton: {e}")
                 elif output_file:
@@ -250,29 +309,32 @@ class ProgressWindow(ctk.CTkToplevel):
             else:
                 # Si annulé, ne pas afficher de fichier même si output_file existe
                 if self.is_cancelled or (error and "Annulation" in error):
-                    if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
-                        self.progress_label.configure(text="Annulé")
+                    try:
+                        if hasattr(self, 'progress_label'):
+                            self.progress_label.configure(text="Annulé")
+                    except Exception:
+                        pass
                     self.output_file = None  # S'assurer qu'aucun fichier n'est disponible
-                    if hasattr(self, 'download_button') and self.download_button.winfo_exists():
-                        self.download_button.configure(state="disabled")
+                    try:
+                        if hasattr(self, 'download_button'):
+                            self.download_button.configure(state="disabled")
+                    except Exception:
+                        pass
                 else:
-                    if hasattr(self, 'progress_label') and self.progress_label.winfo_exists():
-                        self.progress_label.configure(text="Erreur")
+                    try:
+                        if hasattr(self, 'progress_label'):
+                            self.progress_label.configure(text="Erreur")
+                    except Exception:
+                        pass
                     
                     # Même en cas d'erreur, activer le bouton si un fichier existe
                     if file_exists:
                         self.add_log(f"\n✓ Fichier généré (malgré erreur): {output_file}")
                         try:
                             if hasattr(self, 'download_button'):
-                                try:
-                                    if self.download_button.winfo_exists():
-                                        self.download_button.configure(state="normal")
-                                        self.update()
-                                        logger.info("Bouton télécharger activé (success=False mais fichier existe)")
-                                except Exception:
-                                    self.download_button.configure(state="normal")
-                                    self.update()
-                                    logger.info("Bouton télécharger activé (success=False, sans winfo_exists)")
+                                self.download_button.configure(state="normal")
+                                self.update()
+                                logger.info("Bouton télécharger activé (success=False mais fichier existe)")
                         except Exception as e:
                             logger.error(f"Erreur lors de l'activation du bouton: {e}")
                 
@@ -293,17 +355,13 @@ class ProgressWindow(ctk.CTkToplevel):
                             
                             if current_state == "disabled" or current_state == "unknown":
                                 try:
-                                    if self.download_button.winfo_exists():
-                                        self.download_button.configure(state="normal")
-                                        self.update()
-                                        logger.info(f"Bouton télécharger activé (vérification finale): {output_file}")
-                                        if not (success and not self.is_cancelled):
-                                            self.add_log(f"\n✓ Fichier disponible: {output_file}")
-                                except Exception:
-                                    # Si winfo_exists() échoue, essayer quand même
                                     self.download_button.configure(state="normal")
                                     self.update()
-                                    logger.info(f"Bouton télécharger activé (vérification finale, sans winfo_exists): {output_file}")
+                                    logger.info(f"Bouton télécharger activé (vérification finale): {output_file}")
+                                    if not (success and not self.is_cancelled):
+                                        self.add_log(f"\n✓ Fichier disponible: {output_file}")
+                                except Exception:
+                                    pass
                             elif current_state == "normal":
                                 logger.info(f"Bouton télécharger déjà activé: {output_file}")
                             else:
@@ -326,22 +384,60 @@ class ProgressWindow(ctk.CTkToplevel):
     
     def download_file(self):
         """Télécharge le fichier CSV généré."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("=" * 60)
+        logger.info("download_file() APPELÉE")
+        logger.info("=" * 60)
+        
         if not self.output_file or not os.path.exists(self.output_file):
+            logger.warning(f"download_file() - Fichier introuvable: {self.output_file}")
             self.add_log("✗ Fichier introuvable")
             return
         
         try:
+            from datetime import datetime
+            import re
+            
             # Obtenir le nom du fichier source
             source_file = os.path.abspath(self.output_file)
-            filename = os.path.basename(source_file)
+            original_filename = os.path.basename(source_file)
+            
+            logger.info(f"download_file() - Fichier source: {source_file}")
+            logger.info(f"download_file() - Nom original: {original_filename}")
+            
+            # Extraire le nom de base (sans extension)
+            base_name, ext = os.path.splitext(original_filename)
+            
+            # Remplacer la date/heure existante par la date/heure actuelle
+            # Format attendu: YYYYMMDD_HHMMSS (ex: 20260105_183045)
+            timestamp_pattern = r'_\d{8}_\d{6}(?=\.csv|$)'
+            new_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            logger.info(f"download_file() - Pattern: {timestamp_pattern}")
+            logger.info(f"download_file() - Nouveau timestamp: {new_timestamp}")
+            
+            match = re.search(timestamp_pattern, base_name)
+            if match:
+                logger.info(f"download_file() - Match trouvé: {match.group()}")
+                # Remplacer l'ancien timestamp par le nouveau
+                new_filename = re.sub(timestamp_pattern, f'_{new_timestamp}', base_name) + ext
+                logger.info(f"download_file() - Nouveau nom généré: {new_filename}")
+            else:
+                logger.warning(f"download_file() - Aucun timestamp trouvé dans: {base_name}")
+                # Si pas de timestamp trouvé, ajouter le nouveau à la fin
+                new_filename = f"{base_name}_{new_timestamp}{ext}"
+                logger.info(f"download_file() - Nouveau nom (ajout): {new_filename}")
             
             # Demander à l'utilisateur où sauvegarder le fichier
             destination = filedialog.asksaveasfilename(
                 title="Enregistrer le fichier CSV",
                 defaultextension=".csv",
                 filetypes=[("Fichiers CSV", "*.csv"), ("Tous les fichiers", "*.*")],
-                initialfile=filename
+                initialfile=new_filename
             )
+            
+            logger.info(f"download_file() - Destination choisie: {destination}")
             
             if destination:
                 # Copier le fichier vers l'emplacement choisi

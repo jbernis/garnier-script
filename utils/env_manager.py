@@ -3,6 +3,7 @@ Gestion du fichier .env de manière sécurisée.
 """
 
 import os
+import sys
 from typing import Dict, Optional, List, Tuple
 from pathlib import Path
 import logging
@@ -14,7 +15,11 @@ class EnvManager:
     """Gère la lecture et l'écriture du fichier .env."""
     
     def __init__(self, env_file: str = ".env"):
-        self.env_file = Path(env_file)
+        if getattr(sys, "frozen", False):
+            base_dir = Path.home() / "Library" / "Application Support" / "ScrapersShopify"
+            self.env_file = base_dir / ".env"
+        else:
+            self.env_file = Path(env_file)
         self.env_vars = {}
         self.load()
     

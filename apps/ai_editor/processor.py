@@ -2,8 +2,9 @@
 Module de traitement CSV avec les agents IA.
 """
 
+import json
 import logging
-from typing import Dict, List, Optional, Set, Callable, Tuple
+from typing import Dict, List, Optional, Set, Callable, Tuple, Any
 from pathlib import Path
 from datetime import datetime
 
@@ -13,10 +14,47 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.ai_editor.db import AIPromptsDB
 from apps.ai_editor.csv_storage import CSVStorage
-from apps.ai_editor.agents import DescriptionAgent, GoogleShoppingAgent, SEOAgent
+from apps.ai_editor.agents import GoogleShoppingAgent, SEOAgent, QualityControlAgent
+from apps.ai_editor.category_validator import CategoryValidator
 from utils.ai_providers import get_provider, AIProviderError
 
 logger = logging.getLogger(__name__)
+
+# Mapping des clés JSON vers les champs CSV Shopify
+SEO_FIELD_MAPPING = {
+    'seo_title': 'SEO Title',
+    'seo_description': 'SEO Description',
+    'title': 'Title',
+    'body_html': 'Body (HTML)',
+    'tags': 'Tags',
+    'image_alt_text': 'Image Alt Text'
+}
+
+def add_lagustotheque_tag(tags: str) -> str:
+    """
+    Ajoute automatiquement le tag 'Lagustothèque' aux tags existants (en dernière position).
+    
+    Args:
+        tags: String de tags séparés par des virgules
+        
+    Returns:
+        String de tags avec 'Lagustothèque' ajouté à la fin
+    """
+    if not tags or tags.strip() == '':
+        return 'Lagustothèque'
+    
+    # Séparer les tags existants
+    tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+    
+    # Vérifier si Lagustothèque est déjà présent (insensible à la casse)
+    lagustotheque_present = any(t.lower() == 'lagustothèque' for t in tag_list)
+    
+    # Ajouter Lagustothèque à la fin si pas déjà présent
+    if not lagustotheque_present:
+        tag_list.append('Lagustothèque')
+    
+    # Retourner les tags séparés par des virgules
+    return ', '.join(tag_list)
 
 
 class CSVAIProcessor:
@@ -32,6 +70,318 @@ class CSVAIProcessor:
         self.db = db
         self.csv_storage = CSVStorage(db)
     
+    def process_batch(
+        self,
+        csv_import_id: int,
+        batch_handles: List[str],
+        agents: Dict[str, Any],
+        selected_fields: Dict[str, bool],
+        log_callback: Optional[Callable[[str], None]] = None
+    ) -> Dict[str, Dict]:
+        """
+        Traite un batch de produits en une seule requête API par agent.
+        
+        Args:
+            csv_import_id: ID de l'import CSV
+            batch_handles: Liste des handles à traiter dans ce batch
+            agents: Dict des agents IA (seo, google_category)
+            selected_fields: Champs sélectionnés pour le traitement
+            log_callback: Callback pour les logs
+            
+        Returns:
+            Dict {handle: {changements}}
+        """
+        all_changes = {}
+        
+        try:
+            if log_callback:
+                log_callback(f"🔄 Traitement batch de {len(batch_handles)} produits...")
+            
+            # Récupérer les données de tous les produits du batch
+            products_data = {}
+            for handle in batch_handles:
+                rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                if rows:
+                    products_data[handle] = rows[0]['data']
+            
+            if not products_data:
+                logger.warning(f"Aucune donnée trouvée pour le batch")
+                return all_changes
+            
+            # Liste des produits pour le batch
+            batch_products = list(products_data.values())
+            
+            # ===== TRAITEMENT SEO EN BATCH =====
+            if 'seo' in agents:
+                try:
+                    if log_callback:
+                        log_callback(f"  📝 Génération SEO batch ({len(batch_products)} produits)...")
+                    
+                    # Appeler generate_batch()
+                    seo_results = agents['seo'].generate_batch(batch_products)
+                    
+                    # Traiter chaque résultat
+                    for result in seo_results:
+                        handle = result.get('handle')
+                        if not handle or handle not in products_data:
+                            logger.warning(f"Handle invalide ou non trouvé dans le batch: {handle}")
+                            continue
+                        
+                        # Récupérer les lignes CSV pour ce produit
+                        rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                        if not rows:
+                            continue
+                        
+                        # Préparer les changements
+                        product_changes = {}
+                        field_updates = {}
+                        
+                        # Mapper les champs SEO
+                        for json_key, csv_field in SEO_FIELD_MAPPING.items():
+                            if json_key in result and result[json_key]:
+                                new_value = result[json_key]
+                                original_value = rows[0]['data'].get(csv_field, '')
+                                
+                                if new_value != original_value:
+                                    field_updates[csv_field] = new_value
+                                    product_changes[csv_field] = {
+                                        'original': original_value,
+                                        'new': new_value
+                                    }
+                        
+                        # Ajouter le tag Lagustothèque
+                        if 'Tags' in field_updates:
+                            field_updates['Tags'] = add_lagustotheque_tag(field_updates['Tags'])
+                        
+                        # Contrôle qualité: vérifier que TOUS les champs requis ont une VALEUR (pas juste modifiés)
+                        expected_fields = set(SEO_FIELD_MAPPING.values())
+                        
+                        # Règles de validation selon le prompt système SEO
+                        VALIDATION_RULES = {
+                            'SEO Title': {'min_length': 20, 'field_type': 'text'},
+                            'SEO Description': {'min_length': 50, 'field_type': 'text'},
+                            'Title': {'min_length': 10, 'field_type': 'text'},
+                            'Body (HTML)': {'min_length': 350, 'field_type': 'html'},
+                            'Tags': {'min_tags': 3, 'field_type': 'tags'},
+                            'Image Alt Text': {'min_length': 10, 'field_type': 'text'}
+                        }
+                        
+                        # Vérifier les valeurs FINALES (après modification ou originales)
+                        final_values = {}
+                        quality_issues = []  # Liste des problèmes de qualité
+                        
+                        for csv_field in expected_fields:
+                            # Utiliser la nouvelle valeur si modifiée, sinon l'originale
+                            final_value = field_updates.get(csv_field, rows[0]['data'].get(csv_field, ''))
+                            
+                            if final_value and final_value.strip():
+                                final_values[csv_field] = final_value
+                                
+                                # Appliquer les règles de validation
+                                if csv_field in VALIDATION_RULES:
+                                    rules = VALIDATION_RULES[csv_field]
+                                    value_stripped = final_value.strip()
+                                    
+                                    # Validation de longueur
+                                    if 'min_length' in rules:
+                                        if len(value_stripped) < rules['min_length']:
+                                            quality_issues.append(
+                                                f'{csv_field} trop court ({len(value_stripped)} car., min {rules["min_length"]})'
+                                            )
+                                    
+                                    # Validation tags (minimum 3 tags)
+                                    if 'min_tags' in rules:
+                                        tags = [t.strip() for t in value_stripped.split(',') if t.strip()]
+                                        if len(tags) < rules['min_tags']:
+                                            quality_issues.append(
+                                                f'{csv_field}: {len(tags)} tag(s), minimum {rules["min_tags"]} requis'
+                                            )
+                                    
+                                    # Validation HTML (vérifier présence de balises)
+                                    if rules['field_type'] == 'html':
+                                        if '<' not in value_stripped or '>' not in value_stripped:
+                                            quality_issues.append(f'{csv_field} sans balises HTML')
+                        
+                        missing_fields = expected_fields - set(final_values.keys())
+                        
+                        # Mettre à jour toutes les lignes du produit
+                        if field_updates:
+                            for row in rows:
+                                self.csv_storage.update_csv_row(row['id'], field_updates)
+                            
+                            # Déterminer le status selon la complétude ET la qualité
+                            if missing_fields or quality_issues:
+                                # Champs manquants OU problèmes de qualité - mettre à jour TOUTES les lignes du produit
+                                all_issues = []
+                                if missing_fields:
+                                    all_issues.append(f'Champs manquants: {", ".join(missing_fields)}')
+                                if quality_issues:
+                                    all_issues.extend(quality_issues)
+                                
+                                for row in rows:
+                                    self.csv_storage.update_csv_row_status(
+                                        row['id'],
+                                        'error',
+                                        error_message=' | '.join(all_issues),
+                                        ai_explanation=f'Problèmes détectés: {" / ".join(all_issues)}'
+                                    )
+                                if log_callback:
+                                    if missing_fields:
+                                        log_callback(f"  ⚠ {handle}: SEO partiel ({len(final_values)}/{len(expected_fields)} champs)")
+                                    if quality_issues:
+                                        log_callback(f"  ⚠ {handle}: {', '.join(quality_issues)}")
+                            else:
+                                # Tous les champs présents ET qualité OK - mettre à jour TOUTES les lignes du produit
+                                for row in rows:
+                                    self.csv_storage.update_csv_row_status(row['id'], 'completed')
+                                if log_callback:
+                                    log_callback(f"  ✓ {handle}: SEO complet")
+                            
+                            all_changes[handle] = product_changes
+                        else:
+                            # Aucun champ généré - mettre à jour TOUTES les lignes
+                            for row in rows:
+                                self.csv_storage.update_csv_row_status(
+                                    row['id'],
+                                    'error',
+                                    error_message='Aucun champ SEO généré',
+                                    ai_explanation='L\'IA n\'a généré aucun champ SEO pour ce produit'
+                                )
+                            if log_callback:
+                                log_callback(f"  ✗ {handle}: Aucun champ SEO généré")
+                    
+                    # Vérifier les produits manquants
+                    returned_handles = {r.get('handle') for r in seo_results if r.get('handle')}
+                    missing_handles = set(batch_handles) - returned_handles
+                    
+                    for handle in missing_handles:
+                        rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                        if rows:
+                            # Mettre à jour TOUTES les lignes du produit manquant
+                            for row in rows:
+                                self.csv_storage.update_csv_row_status(
+                                    row['id'],
+                                    'error',
+                                    error_message='Produit non retourné par l\'IA',
+                                    ai_explanation='Le produit était inclus dans le batch mais absent de la réponse JSON'
+                                )
+                            if log_callback:
+                                log_callback(f"  ✗ {handle}: Non retourné par l'IA")
+                
+                except Exception as e:
+                    logger.error(f"Erreur batch SEO: {e}", exc_info=True)
+                    # Marquer tout le batch en erreur - TOUTES les lignes
+                    for handle in batch_handles:
+                        rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                        if rows:
+                            for row in rows:
+                                self.csv_storage.update_csv_row_status(
+                                    row['id'],
+                                    'error',
+                                    error_message=str(e),
+                                    ai_explanation=f'Erreur lors du traitement batch SEO: {e}'
+                                )
+                    if log_callback:
+                        log_callback(f"  ✗ Erreur batch SEO: {str(e)[:100]}")
+            
+            # ===== TRAITEMENT GOOGLE SHOPPING EN BATCH =====
+            if 'google_category' in agents:
+                try:
+                    if log_callback:
+                        log_callback(f"  🛍️ Génération Google Shopping batch ({len(batch_products)} produits)...")
+                    
+                    # Appeler generate_batch()
+                    google_results = agents['google_category'].generate_batch(batch_products)
+                    
+                    # Traiter chaque résultat
+                    for result in google_results:
+                        handle = result.get('handle')
+                        if not handle or handle not in products_data:
+                            continue
+                        
+                        category_path = result.get('google_category', '').strip()
+                        
+                        if not category_path:
+                            # Catégorie vide - mettre à jour TOUTES les lignes
+                            rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                            if rows:
+                                for row in rows:
+                                    self.csv_storage.update_csv_row_status(
+                                        row['id'],
+                                        'error',
+                                        error_message='Catégorie Google Shopping vide',
+                                        ai_explanation='L\'IA n\'a pas généré de catégorie'
+                                    )
+                                if log_callback:
+                                    log_callback(f"  ⚠ {handle}: Catégorie vide")
+                            continue
+                        
+                        # Mapper le chemin vers le code
+                        category_code = self.db.search_google_category(category_path)
+                        
+                        if category_code:
+                            rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                            if rows:
+                                for row in rows:
+                                    self.csv_storage.update_csv_row(
+                                        row['id'],
+                                        {'Google Shopping / Google Product Category': category_code}
+                                    )
+                                
+                                # Mettre à jour le statut de TOUTES les lignes du produit
+                                for row in rows:
+                                    self.csv_storage.update_csv_row_status(row['id'], 'completed')
+                                
+                                if handle not in all_changes:
+                                    all_changes[handle] = {}
+                                all_changes[handle]['Google Shopping / Google Product Category'] = {
+                                    'original': rows[0]['data'].get('Google Shopping / Google Product Category', ''),
+                                    'new': category_code
+                                }
+                                
+                                if log_callback:
+                                    log_callback(f"  ✓ {handle}: Catégorie Google Shopping mise à jour")
+                        else:
+                            # Code non trouvé - mettre à jour TOUTES les lignes
+                            rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                            if rows:
+                                for row in rows:
+                                    self.csv_storage.update_csv_row_status(
+                                        row['id'],
+                                        'error',
+                                        error_message=f'Code introuvable pour "{category_path}"',
+                                        ai_explanation=f'La catégorie "{category_path}" n\'existe pas dans la taxonomie Google'
+                                    )
+                                if log_callback:
+                                    log_callback(f"  ⚠ {handle}: Code introuvable pour '{category_path}'")
+                
+                except Exception as e:
+                    logger.error(f"Erreur batch Google Shopping: {e}", exc_info=True)
+                    # Marquer tout le batch en erreur - TOUTES les lignes
+                    for handle in batch_handles:
+                        rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
+                        if rows:
+                            for row in rows:
+                                self.csv_storage.update_csv_row_status(
+                                    row['id'],
+                                    'error',
+                                    error_message=str(e),
+                                    ai_explanation=f'Erreur lors du traitement batch Google Shopping: {e}'
+                                )
+                    if log_callback:
+                        log_callback(f"  ✗ Erreur batch Google Shopping: {str(e)[:100]}")
+            
+            if log_callback:
+                log_callback(f"✓ Batch de {len(batch_handles)} produits traité")
+            
+            return all_changes
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement du batch: {e}", exc_info=True)
+            if log_callback:
+                log_callback(f"✗ Erreur batch: {str(e)[:100]}")
+            return all_changes
+    
     def process_csv(
         self,
         csv_path: str,
@@ -42,7 +392,9 @@ class CSVAIProcessor:
         selected_handles: Optional[Set[str]] = None,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
-        cancel_check: Optional[Callable[[], bool]] = None
+        cancel_check: Optional[Callable[[], bool]] = None,
+        enable_search: bool = False,
+        csv_import_id: Optional[int] = None
     ) -> Tuple[bool, Optional[str], Dict, Optional[int]]:
         """
         Traite un fichier CSV avec les agents IA.
@@ -66,18 +418,20 @@ class CSVAIProcessor:
             - processing_result_id: ID du résultat de traitement
         """
         try:
-            if log_callback:
-                log_callback("Import du CSV en base de données...")
-            
             # Vérifier l'annulation
             if cancel_check and cancel_check():
                 return (False, None, {}, None)
             
-            # 1. Importer le CSV en base de données
-            csv_import_id = self.csv_storage.import_csv(csv_path)
-            
-            if log_callback:
-                log_callback(f"CSV importé (ID: {csv_import_id})")
+            # 1. Importer le CSV en base de données (seulement si pas déjà importé)
+            if csv_import_id is None:
+                if log_callback:
+                    log_callback("Import du CSV en base de données...")
+                csv_import_id = self.csv_storage.import_csv(csv_path)
+                if log_callback:
+                    log_callback(f"CSV importé (ID: {csv_import_id})")
+            else:
+                if log_callback:
+                    log_callback(f"Utilisation de l'import existant (ID: {csv_import_id})")
             
             # 2. Récupérer l'ensemble de prompts
             prompt_set = self.db.get_prompt_set(prompt_set_id)
@@ -91,7 +445,23 @@ class CSVAIProcessor:
             
             # 4. Créer le fournisseur IA
             try:
-                ai_provider = get_provider(provider_name, api_key=api_key, model=model_name)
+                # Récupérer les credentials Perplexity si enable_search est activé
+                perplexity_api_key = None
+                perplexity_model = None
+                if enable_search and provider_name in ['openai', 'claude']:
+                    perplexity_creds = self.db.get_ai_credentials('perplexity')
+                    if perplexity_creds:
+                        perplexity_api_key = perplexity_creds['api_key']
+                        perplexity_model = perplexity_creds['default_model']
+                
+                ai_provider = get_provider(
+                    provider_name, 
+                    api_key=api_key, 
+                    model=model_name,
+                    enable_search=enable_search,
+                    perplexity_api_key=perplexity_api_key,
+                    perplexity_model=perplexity_model
+                )
             except AIProviderError as e:
                 raise ValueError(f"Erreur lors de l'initialisation du fournisseur IA: {e}")
             
@@ -142,142 +512,88 @@ class CSVAIProcessor:
             if log_callback:
                 log_callback(f"{total_products} produit(s) à traiter")
             
-            # 7. Traiter chaque produit
+            # 7. Récupérer la taille du batch depuis la configuration
+            batch_size = self.db.get_config_int('batch_size', default=20)
+            logger.info(f"Taille du batch configurée: {batch_size}")
+            if log_callback:
+                log_callback(f"Configuration: batch_size={batch_size}")
+            
+            # 8. Traiter les produits
             changes_dict = {}
             processed_count = 0
+            handles_list = list(products_by_handle.keys())
             
-            for handle, product_rows in products_by_handle.items():
-                # Vérifier l'annulation
-                if cancel_check and cancel_check():
-                    return (False, None, changes_dict, None)
-                
+            # Diviser en batches
+            if batch_size > 1:
+                # Mode BATCH
+                batches = [handles_list[i:i+batch_size] for i in range(0, len(handles_list), batch_size)]
+                logger.info(f"Mode BATCH: {len(batches)} batch(s) de max {batch_size} produits")
                 if log_callback:
-                    log_callback(f"Traitement du produit: {handle}")
+                    log_callback(f"Mode BATCH: {len(batches)} batch(s) à traiter")
                 
-                if progress_callback:
-                    progress_callback(f"Traitement de {handle}", processed_count, total_products)
+                for batch_idx, batch_handles in enumerate(batches, 1):
+                    # Vérifier l'annulation
+                    if cancel_check and cancel_check():
+                        return (False, None, changes_dict, None)
+                    
+                    if log_callback:
+                        log_callback(f"Batch {batch_idx}/{len(batches)}: {len(batch_handles)} produits")
+                    
+                    if progress_callback:
+                        progress_callback(f"Batch {batch_idx}/{len(batches)}", processed_count, total_products)
+                    
+                    # Traiter le batch
+                    batch_changes = self.process_batch(
+                        csv_import_id,
+                        batch_handles,
+                        agents,
+                        selected_fields,
+                        log_callback
+                    )
+                    
+                    # Fusionner les changements
+                    changes_dict.update(batch_changes)
+                    processed_count += len(batch_handles)
+                    
+                    if log_callback:
+                        log_callback(f"Batch {batch_idx}/{len(batches)}: {len(batch_changes)} produit(s) traité(s)")
+            else:
+                # Mode SÉQUENTIEL (batch_size == 1)
+                logger.info(f"Mode SÉQUENTIEL: traitement produit par produit")
+                if log_callback:
+                    log_callback(f"Mode SÉQUENTIEL: {len(handles_list)} produit(s) à traiter")
                 
-                # Utiliser la première ligne comme référence pour les données du produit
-                product_data = product_rows[0]['data']
-                
-                # Traiter chaque champ sélectionné
-                product_changes = {}
-                
-                # Description
-                if 'description' in agents:
-                    try:
-                        original_value = product_data.get('Body (HTML)', '')
-                        new_value = agents['description'].generate(product_data)
-                        
-                        # Mettre à jour toutes les lignes du produit
-                        for row in product_rows:
-                            self.csv_storage.update_csv_row(row['id'], {'Body (HTML)': new_value})
-                        
-                        product_changes['Body (HTML)'] = {
-                            'original': original_value,
-                            'new': new_value
-                        }
-                        
-                        if log_callback:
-                            log_callback(f"  ✓ Description mise à jour")
-                    except Exception as e:
-                        logger.error(f"Erreur lors du traitement de la description pour {handle}: {e}")
-                        if log_callback:
-                            log_callback(f"  ✗ Erreur description: {e}")
-                
-                # Google Shopping Category
-                if 'google_category' in agents:
-                    try:
-                        original_value = product_data.get('Google Shopping / Google Product Category', '')
-                        new_value = agents['google_category'].generate(product_data)
-                        
-                        # Mettre à jour toutes les lignes du produit
-                        for row in product_rows:
-                            self.csv_storage.update_csv_row(
-                                row['id'],
-                                {'Google Shopping / Google Product Category': new_value}
-                            )
-                        
-                        product_changes['Google Shopping / Google Product Category'] = {
-                            'original': original_value,
-                            'new': new_value
-                        }
-                        
-                        if log_callback:
-                            log_callback(f"  ✓ Catégorie Google Shopping mise à jour")
-                    except Exception as e:
-                        logger.error(f"Erreur lors du traitement de la catégorie Google Shopping pour {handle}: {e}")
-                        if log_callback:
-                            log_callback(f"  ✗ Erreur catégorie: {e}")
-                
-                # SEO
-                if 'seo' in agents:
-                    try:
-                        original_seo_title = product_data.get('SEO Title', '')
-                        original_seo_description = product_data.get('SEO Description', '')
-                        original_image_alt = product_data.get('Image Alt Text', '')
-                        
-                        seo_result = agents['seo'].generate(product_data)
-                        
-                        # Mettre à jour toutes les lignes du produit
-                        for row in product_rows:
-                            updates = {}
-                            if 'seo_title' in seo_result:
-                                updates['SEO Title'] = seo_result['seo_title']
-                            if 'seo_description' in seo_result:
-                                updates['SEO Description'] = seo_result['seo_description']
-                            if 'image_alt_text' in seo_result:
-                                updates['Image Alt Text'] = seo_result['image_alt_text']
-                            
-                            if updates:
-                                self.csv_storage.update_csv_row(row['id'], updates)
-                        
-                        if 'seo_title' in seo_result:
-                            product_changes['SEO Title'] = {
-                                'original': original_seo_title,
-                                'new': seo_result['seo_title']
-                            }
-                        if 'seo_description' in seo_result:
-                            product_changes['SEO Description'] = {
-                                'original': original_seo_description,
-                                'new': seo_result['seo_description']
-                            }
-                        if 'image_alt_text' in seo_result:
-                            product_changes['Image Alt Text'] = {
-                                'original': original_image_alt,
-                                'new': seo_result['image_alt_text']
-                            }
-                        
-                        if log_callback:
-                            log_callback(f"  ✓ SEO mis à jour")
-                    except Exception as e:
-                        logger.error(f"Erreur lors du traitement SEO pour {handle}: {e}")
-                        if log_callback:
-                            log_callback(f"  ✗ Erreur SEO: {e}")
-                
-                if product_changes:
-                    changes_dict[handle] = product_changes
-                
-                processed_count += 1
+                for handle in handles_list:
+                    # Vérifier l'annulation
+                    if cancel_check and cancel_check():
+                        return (False, None, changes_dict, None)
+                    
+                    if log_callback:
+                        log_callback(f"Traitement du produit: {handle}")
+                    
+                    if progress_callback:
+                        progress_callback(f"Traitement de {handle}", processed_count, total_products)
+                    
+                    # Traiter un seul produit comme un batch de 1
+                    batch_changes = self.process_batch(
+                        csv_import_id,
+                        [handle],
+                        agents,
+                        selected_fields,
+                        log_callback
+                    )
+                    
+                    changes_dict.update(batch_changes)
+                    processed_count += 1
             
-            # 8. Exporter le CSV final
-            if log_callback:
-                log_callback("Export du CSV final...")
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = Path("outputs/ai_editor")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = str(output_dir / f"shopify_ai_processed_{timestamp}.csv")
-            
-            self.csv_storage.export_csv(csv_import_id, output_path)
-            
-            # 9. Sauvegarder le résultat de traitement
+            # 8. Sauvegarder le résultat de traitement
+            # Note: Le CSV sera généré à la demande via le bouton "Générer CSV"
             processed_handles = list(changes_dict.keys())
             fields_processed = [field for field, enabled in selected_fields.items() if enabled]
             
             processing_result_id = self.db.save_processing_result(
                 csv_import_id,
-                output_path,
+                None,  # Pas de fichier généré automatiquement
                 prompt_set_id,
                 provider_name,
                 model_name,
@@ -303,12 +619,104 @@ class CSVAIProcessor:
                         )
             
             if log_callback:
-                log_callback(f"Traitement terminé: {len(changes_dict)} produit(s) modifié(s)")
+                log_callback(f"✅ Traitement terminé: {len(changes_dict)} produit(s) modifié(s)")
+                log_callback(f"💡 Utilisez le bouton 'Générer CSV' pour exporter le fichier")
             
-            return (True, output_path, changes_dict, processing_result_id)
+            return (True, None, changes_dict, processing_result_id)
             
         except Exception as e:
             logger.error(f"Erreur lors du traitement CSV: {e}", exc_info=True)
             if log_callback:
                 log_callback(f"Erreur: {e}")
             return (False, None, {}, None)
+    
+    def process_single_product(
+        self,
+        csv_import_id: int,
+        handle: str,
+        prompt_set_id: int,
+        provider_name: str,
+        model_name: str,
+        selected_fields: Dict,
+        log_callback: Optional[Callable] = None,
+        enable_search: bool = False
+    ) -> Tuple[bool, Dict]:
+        """
+        Traite un seul produit pour les tests.
+        
+        Args:
+            csv_import_id: ID de l'import CSV
+            handle: Handle du produit à traiter
+            prompt_set_id: ID de l'ensemble de prompts
+            provider_name: Nom du fournisseur IA
+            model_name: Nom du modèle
+            selected_fields: Champs à traiter
+            log_callback: Callback pour les logs
+            enable_search: Activer la recherche Internet
+            
+        Returns:
+            Tuple (success, changes_dict)
+        """
+        try:
+            # Récupérer les credentials AI
+            api_key = self.db.get_ai_credentials(provider_name)
+            if not api_key:
+                raise ValueError(f"Credentials AI non trouvés pour {provider_name}")
+            
+            # Créer le fournisseur IA
+            perplexity_api_key = None
+            perplexity_model = None
+            if enable_search and provider_name in ['openai', 'claude']:
+                perplexity_creds = self.db.get_ai_credentials('perplexity')
+                if perplexity_creds:
+                    perplexity_api_key = perplexity_creds['api_key']
+                    perplexity_model = perplexity_creds['default_model']
+            
+            from utils.ai_providers import get_provider
+            ai_provider = get_provider(
+                provider_name,
+                api_key=api_key,
+                model=model_name,
+                enable_search=enable_search,
+                perplexity_api_key=perplexity_api_key,
+                perplexity_model=perplexity_model
+            )
+            
+            # Récupérer l'ensemble de prompts
+            prompt_set = self.db.get_prompt_set(prompt_set_id)
+            if not prompt_set:
+                raise ValueError(f"Ensemble de prompts {prompt_set_id} introuvable")
+            
+            # Créer les agents
+            from apps.ai_editor.agents import SEOAgent, GoogleShoppingAgent
+            agents = {
+                'seo': SEOAgent(
+                    ai_provider,
+                    prompt_set['seo_system_prompt'],
+                    prompt_set['seo_prompt']
+                ),
+                'google_shopping': GoogleShoppingAgent(
+                    ai_provider,
+                    prompt_set['google_shopping_system_prompt'],
+                    prompt_set['google_category_prompt']
+                )
+            }
+            
+            # Traiter le produit
+            changes_dict = self.process_batch(
+                csv_import_id,
+                [handle],
+                agents,
+                selected_fields,
+                log_callback
+            )
+            
+            # Retourner les changements pour ce produit
+            if handle in changes_dict:
+                return (True, changes_dict[handle])
+            else:
+                return (False, {})
+                
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement du produit {handle}: {e}", exc_info=True)
+            return (False, {})

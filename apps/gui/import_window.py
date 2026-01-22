@@ -329,7 +329,7 @@ class ImportWindow(ctk.CTkToplevel):
             text="🔍 Diagnostic & Retraitement",
             command=self.open_diagnostic_window,
             width=220,
-            height=40,
+            height=30,
             state="disabled",
             fg_color="orange",
             hover_color="darkorange"
@@ -342,7 +342,7 @@ class ImportWindow(ctk.CTkToplevel):
             text="Démarrer l'import",
             command=self.start_import,
             width=200,
-            height=40,
+            height=30,
             state="disabled",
             fg_color="green",
             hover_color="darkgreen"
@@ -512,65 +512,80 @@ class ImportWindow(ctk.CTkToplevel):
     
     def add_category_display(self, category: Dict[str, str], index: int, total: int):
         """Ajoute une catégorie à l'affichage progressivement."""
-        # Ajouter la catégorie à la liste
-        self.categories.append(category)
+        try:
+            # Vérifier que la fenêtre existe encore
+            if not self.winfo_exists():
+                return
+        except Exception:
+            return
         
-        # Mettre à jour le statut (de manière sécurisée)
-        self.safe_configure_label('status_label',
-            text=f"Chargement des catégories ({index+1}/{total})...",
-            text_color="#FFFF99"
-        )
-        self.safe_configure_label('loading_label',
-            text=f"Catégorie {index+1}/{total}",
-            text_color="#FFFF99"
-        )
-        
-        # Créer le checkbox pour cette catégorie
-        if self.selected_scraper and self.selected_scraper.supports_subcategories:
-            # Pour Cristel, créer un frame pour la catégorie avec ses sous-catégories
-            category_frame = ctk.CTkFrame(self.categories_listbox_frame)
-            category_frame.pack(fill="x", padx=10, pady=2)
+        try:
+            # Ajouter la catégorie à la liste
+            self.categories.append(category)
             
-            # Checkbox de la catégorie
-            var = ctk.BooleanVar(value=False)
-            checkbox = ctk.CTkCheckBox(
-                category_frame,
-                text=category['name'],
-                variable=var
+            # Mettre à jour le statut (de manière sécurisée)
+            self.safe_configure_label('status_label',
+                text=f"Chargement des catégories ({index+1}/{total})...",
+                text_color="#FFFF99"
             )
-            checkbox.pack(anchor="w", padx=0, pady=2)
-            
-            # Ajouter un traceur pour gérer la sélection de la catégorie
-            var.trace_add('write', lambda *args, cat_name=category['name']: self.on_category_checkbox_changed(cat_name))
-            
-            self.categories_checkboxes[category['name']] = {
-                'var': var,
-                'category': category,
-                'category_frame': category_frame,
-                'subcategories_frame': None,  # Sera créé seulement si nécessaire
-                'subcategories': {}
-            }
-        else:
-            # Pour les autres fournisseurs, affichage simple
-            var = ctk.BooleanVar(value=False)
-            checkbox = ctk.CTkCheckBox(
-                self.categories_listbox_frame,
-                text=category['name'],
-                variable=var
+            self.safe_configure_label('loading_label',
+                text=f"Catégorie {index+1}/{total}",
+                text_color="#FFFF99"
             )
-            checkbox.pack(anchor="w", padx=10, pady=5)
-            self.categories_checkboxes[category['name']] = {
-                'var': var,
-                'category': category
-            }
+        except Exception:
+            return
         
-        # Activer les boutons si on a au moins une catégorie
-        if len(self.categories) == 1:
-            self.select_all_button.configure(state="normal")
-            self.deselect_all_button.configure(state="normal")
+        # Créer le checkbox pour cette catégorie (protégé)
+        try:
+            if self.selected_scraper and self.selected_scraper.supports_subcategories:
+                # Pour Cristel, créer un frame pour la catégorie avec ses sous-catégories
+                category_frame = ctk.CTkFrame(self.categories_listbox_frame)
+                category_frame.pack(fill="x", padx=10, pady=2)
+                
+                # Checkbox de la catégorie
+                var = ctk.BooleanVar(value=False)
+                checkbox = ctk.CTkCheckBox(
+                    category_frame,
+                    text=category['name'],
+                    variable=var
+                )
+                checkbox.pack(anchor="w", padx=0, pady=2)
+                
+                # Ajouter un traceur pour gérer la sélection de la catégorie
+                var.trace_add('write', lambda *args, cat_name=category['name']: self.on_category_checkbox_changed(cat_name))
+                
+                self.categories_checkboxes[category['name']] = {
+                    'var': var,
+                    'category': category,
+                    'category_frame': category_frame,
+                    'subcategories_frame': None,  # Sera créé seulement si nécessaire
+                    'subcategories': {}
+                }
+            else:
+                # Pour les autres fournisseurs, affichage simple
+                var = ctk.BooleanVar(value=False)
+                checkbox = ctk.CTkCheckBox(
+                    self.categories_listbox_frame,
+                    text=category['name'],
+                    variable=var
+                )
+                checkbox.pack(anchor="w", padx=10, pady=5)
+                self.categories_checkboxes[category['name']] = {
+                    'var': var,
+                    'category': category
+                }
         
-        # Forcer la mise à jour de l'interface
-        self.update_idletasks()
+            # Activer les boutons si on a au moins une catégorie
+            if len(self.categories) == 1:
+                self.select_all_button.configure(state="normal")
+                self.deselect_all_button.configure(state="normal")
+            
+            # Forcer la mise à jour de l'interface
+            self.update_idletasks()
+        except Exception as e:
+            # Si une erreur se produit lors de la création des widgets, l'ignorer silencieusement
+            # (cela arrive si la fenêtre est fermée pendant le chargement)
+            pass
     
     def categories_loaded(self, categories: List[Dict[str, str]]):
         """Appelé quand toutes les catégories sont chargées."""
@@ -602,7 +617,11 @@ class ImportWindow(ctk.CTkToplevel):
                     text_color="green"
                 )
                 # Réactiver le bouton pour les autres fournisseurs (pas de sous-catégories)
-                self.start_button.configure(state="normal")
+                try:
+                    if hasattr(self, 'start_button'):
+                        self.start_button.configure(state="normal")
+                except Exception:
+                    pass
         else:
             # Arrêter le spinner si aucune catégorie
             self.loading_spinner.stop()
@@ -749,47 +768,59 @@ class ImportWindow(ctk.CTkToplevel):
         
         logger.info(f"Affichage de {len(subcategories)} sous-catégories pour {category['name']}")
         
-        category_data = self.categories_checkboxes[category['name']]
-        category_frame = category_data.get('category_frame')
-        
-        if not category_frame:
-            logger.warning(f"Frame de catégorie non trouvé pour {category['name']}")
+        # Vérifier que la fenêtre existe encore
+        try:
+            if not self.winfo_exists():
+                return
+        except Exception:
             return
         
-        # Créer le frame des sous-catégories seulement maintenant (si on a des sous-catégories)
-        subcategories_frame = ctk.CTkFrame(category_frame)
-        subcategories_frame.pack(fill="x", padx=20, pady=(0, 2))
-        category_data['subcategories_frame'] = subcategories_frame
-        
-        # Stocker les sous-catégories
-        if 'subcategories' not in category_data:
-            category_data['subcategories'] = {}
-        
-        # Créer les checkboxes pour les sous-catégories avec indentation
-        # Les ajouter dans le frame des sous-catégories de cette catégorie
-        for subcat in subcategories:
-            if not isinstance(subcat, dict) or 'name' not in subcat:
-                logger.warning(f"Sous-catégorie invalide: {subcat}")
-                continue
+        try:
+            category_data = self.categories_checkboxes[category['name']]
+            category_frame = category_data.get('category_frame')
+            
+            if not category_frame:
+                logger.warning(f"Frame de catégorie non trouvé pour {category['name']}")
+                return
+            
+            # Créer le frame des sous-catégories seulement maintenant (si on a des sous-catégories)
+            subcategories_frame = ctk.CTkFrame(category_frame)
+            subcategories_frame.pack(fill="x", padx=20, pady=(0, 2))
+            category_data['subcategories_frame'] = subcategories_frame
+            
+            # Stocker les sous-catégories
+            if 'subcategories' not in category_data:
+                category_data['subcategories'] = {}
+            
+            # Créer les checkboxes pour les sous-catégories avec indentation
+            # Les ajouter dans le frame des sous-catégories de cette catégorie
+            for subcat in subcategories:
+                if not isinstance(subcat, dict) or 'name' not in subcat:
+                    logger.warning(f"Sous-catégorie invalide: {subcat}")
+                    continue
+                    
+                var = ctk.BooleanVar(value=False)
+                checkbox = ctk.CTkCheckBox(
+                    subcategories_frame,
+                    text=f"└─ {subcat['name']}",  # Indentation visuelle
+                    variable=var
+                )
+                checkbox.pack(anchor="w", padx=0, pady=1)  # Dans le frame déjà indenté
                 
-            var = ctk.BooleanVar(value=False)
-            checkbox = ctk.CTkCheckBox(
-                subcategories_frame,
-                text=f"└─ {subcat['name']}",  # Indentation visuelle
-                variable=var
-            )
-            checkbox.pack(anchor="w", padx=0, pady=1)  # Dans le frame déjà indenté
+                # Ajouter un traceur pour gérer la sélection de la sous-catégorie
+                var.trace_add('write', lambda *args, cat_name=category['name'], subcat_name=subcat['name']: 
+                             self.on_subcategory_checkbox_changed(cat_name, subcat_name))
+                
+                category_data['subcategories'][subcat['name']] = {
+                    'var': var,
+                    'subcategory': subcat
+                }
             
-            # Ajouter un traceur pour gérer la sélection de la sous-catégorie
-            var.trace_add('write', lambda *args, cat_name=category['name'], subcat_name=subcat['name']: 
-                         self.on_subcategory_checkbox_changed(cat_name, subcat_name))
-            
-            category_data['subcategories'][subcat['name']] = {
-                'var': var,
-                'subcategory': subcat
-            }
-        
-        logger.info(f"Sous-catégories affichées pour {category['name']}")
+            logger.info(f"Sous-catégories affichées pour {category['name']}")
+        except Exception as e:
+            # Si une erreur se produit lors de la création des widgets, l'ignorer silencieusement
+            # (cela arrive si la fenêtre est fermée pendant le chargement)
+            logger.debug(f"Erreur lors de l'affichage des sous-catégories pour {category['name']}: {e}")
     
     def on_category_checkbox_changed(self, category_name: str):
         """Appelé quand la checkbox d'une catégorie change."""

@@ -17,9 +17,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scrapers.base_scraper import BaseScraper
 from utils.env_manager import EnvManager
 
+# Résolution de chemins compatible PyInstaller
+def resource_path(*parts):
+    if getattr(sys, "frozen", False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, *parts)
+
 # Importer les fonctions du garnier_functions.py
 import importlib.util
-garnier_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "garnier", "garnier_functions.py")
+garnier_path = resource_path("garnier", "garnier_functions.py")
 
 if not os.path.exists(garnier_path):
     raise FileNotFoundError(f"Fichier garnier_functions.py introuvable: {garnier_path}")
@@ -141,6 +149,8 @@ class GarnierScraper(BaseScraper):
             
             def check_and_wait_if_needed(error_msg: str = None):
                 """Vérifie la disponibilité du site et attend si nécessaire."""
+                nonlocal session  # Permettre la mise à jour de la session du scope parent
+                
                 if error_msg:
                     msg = f"⚠️  Erreur détectée: {error_msg}"
                     print(msg)
@@ -164,10 +174,41 @@ class GarnierScraper(BaseScraper):
                     
                     # Attendre que le site redevienne accessible
                     if wait_for_site_accessible(session, base_url, check_interval=30, timeout=10):
-                        msg = "✓ Site redevenu accessible, reprise..."
+                        msg = "✓ Site redevenu accessible (code 200 détecté), ré-authentification avant reprise..."
                         print(msg)
                         if log_callback:
                             log_callback(msg)
+                        
+                        # Ré-authentifier avant de reprendre (2ème retry)
+                        # car un code 200 peut être retourné même sans authentification
+                        try:
+                            msg = "Ré-authentification en cours..."
+                            print(msg)
+                            if log_callback:
+                                log_callback(msg)
+                            
+                            from garnier.scraper_garnier_module import authenticate
+                            driver, authenticated_session = authenticate(headless=headless)
+                            
+                            # Mettre à jour la session avec la session authentifiée pour les vérifications suivantes
+                            session = authenticated_session
+                            
+                            msg = "✓ Ré-authentification réussie"
+                            print(msg)
+                            if log_callback:
+                                log_callback(msg)
+                            
+                            # Note: Les scripts appelés via subprocess géreront leur propre authentification,
+                            # mais cette authentification permet de vérifier la connexion et d'afficher
+                            # des messages de diagnostic dans l'UI, et de réutiliser la session pour les vérifications suivantes
+                            
+                        except Exception as auth_error:
+                            msg = f"✗ Erreur lors de la ré-authentification: {auth_error}"
+                            print(msg)
+                            if log_callback:
+                                log_callback(msg)
+                            return False
+                        
                         return True
                     else:
                         msg = "✗ Site toujours inaccessible après attente"
@@ -249,7 +290,7 @@ class GarnierScraper(BaseScraper):
             # Construire la commande pour scraper-garnier-collect.py
             collect_cmd = [
                 sys.executable,
-                "scraper-garnier-collect.py",
+                resource_path("garnier", "scraper-collect.py"),
                 "--db", db_path
             ]
             
@@ -275,19 +316,21 @@ class GarnierScraper(BaseScraper):
                 return False, None, "Annulation demandée par l'utilisateur"
             
             # Vérifier la disponibilité du site si erreur détectée (seulement après étape 1)
-            if returncode != 0 or error_lines:
+            if returncode != 0:
                 error_msg = f"Erreur lors de la collecte (code {returncode})"
                 if not check_and_wait_if_needed(error_msg):
                     session.close()
                     return False, None, "Site non accessible après erreur de collecte"
                 
-                # Réessayer une fois après vérification
-                msg = "Réessai de la collecte..."
+                # Réessayer une fois après vérification, mais seulement les erreurs
+                msg = "Réessai de la collecte (produits en erreur uniquement)..."
                 print(msg)
                 if log_callback:
                     log_callback(msg)
                 
-                returncode, error_lines, _ = run_script(collect_cmd, "Collecte des URLs (réessai)", 1, 3)
+                # Créer une nouvelle commande avec --retry-errors-only
+                collect_cmd_retry = collect_cmd + ["--retry-errors-only"]
+                returncode, error_lines, _ = run_script(collect_cmd_retry, "Collecte des URLs (erreurs uniquement)", 1, 3)
                 
                 if returncode is False:  # Annulation
                     session.close()
@@ -310,7 +353,7 @@ class GarnierScraper(BaseScraper):
             # Construire la commande pour scraper-garnier-process.py
             process_cmd = [
                 sys.executable,
-                "scraper-garnier-process.py",
+                resource_path("garnier", "scraper-process.py"),
                 "--db", db_path
             ]
             
@@ -343,19 +386,21 @@ class GarnierScraper(BaseScraper):
                 return False, None, "Annulation demandée par l'utilisateur"
             
             # Vérifier la disponibilité du site si erreur détectée
-            if returncode != 0 or error_lines:
+            if returncode != 0:
                 error_msg = f"Erreur lors du traitement (code {returncode})"
                 if not check_and_wait_if_needed(error_msg):
                     session.close()
                     return False, None, "Site non accessible après erreur de traitement"
                 
-                # Réessayer une fois après vérification
-                msg = "Réessai du traitement..."
+                # Réessayer une fois après vérification, mais seulement les erreurs
+                msg = "Réessai du traitement (variants en erreur uniquement)..."
                 print(msg)
                 if log_callback:
                     log_callback(msg)
                 
-                returncode, error_lines, _ = run_script(process_cmd, "Traitement des variants (réessai)", 2, 3)
+                # Créer une nouvelle commande avec --retry-errors
+                process_cmd_retry = process_cmd + ["--retry-errors"]
+                returncode, error_lines, _ = run_script(process_cmd_retry, "Traitement des variants (erreurs uniquement)", 2, 3)
                 
                 if returncode is False:  # Annulation
                     session.close()
@@ -373,7 +418,7 @@ class GarnierScraper(BaseScraper):
             # Construire la commande pour scraper-garnier-generate-csv.py
             generate_cmd = [
                 sys.executable,
-                "scraper-garnier-generate-csv.py",
+                resource_path("garnier", "scraper-generate-csv.py"),
                 "--db", db_path
             ]
             

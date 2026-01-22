@@ -38,7 +38,7 @@ OUTPUT_DIR = os.getenv("CRISTEL_OUTPUT_DIR", "outputs/cristel")
 
 
 def generate_csv_from_db(output_file=None, output_db='cristel_products.db', 
-                         supplier='cristel', categories=None, subcategory=None):
+                         supplier='cristel', categories=None, subcategory=None, max_images=None):
     """
     Génère le CSV Shopify depuis la base de données Cristel.
     
@@ -49,6 +49,12 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
         categories: Liste de catégories à inclure (None = toutes)
         subcategory: Nom de la sous-catégorie à filtrer (None = toutes)
     """
+    logger.info("="*80)
+    logger.info("CRISTEL SCRAPER - generate_csv_from_db appelé")
+    logger.info(f"  - categories: {categories}")
+    logger.info(f"  - subcategory: {subcategory}")
+    logger.info("="*80)
+    
     db = CristelDB(output_db)
     
     try:
@@ -57,6 +63,7 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
         shopify_columns = csv_config_manager.get_columns(supplier)
         handle_source = csv_config_manager.get_handle_source(supplier)
         vendor_name = csv_config_manager.get_vendor(supplier)
+        location_name = csv_config_manager.get_location(supplier)
         
         # Récupérer les produits avec leurs variants complétés
         products = db.get_completed_products(categories=categories, subcategory=subcategory)
@@ -96,6 +103,11 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
             images = db.get_product_images(product_id)
             image_urls = [img['image_url'] for img in images]
             
+            # Limiter le nombre d'images si max_images est spécifié
+            if max_images and len(image_urls) > max_images:
+                logger.info(f"Limitation des images pour {product_code}: {len(image_urls)} → {max_images}")
+                image_urls = image_urls[:max_images]
+            
             # Générer le Handle selon la configuration
             if handle_source == 'barcode':
                 first_barcode = None
@@ -127,7 +139,7 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
             published_value = 'FALSE' if is_new else 'TRUE'
             
             # Créer une ligne CSV par variant
-            for variant in completed_variants:
+            for variant_idx, variant in enumerate(completed_variants):
                 variant_sku = variant.get('sku') or variant['code_vl']
                 variant_gencode = variant.get('gencode') or ''
                 variant_price_pvc = variant.get('price_pvc') or ''
@@ -145,72 +157,88 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
                     tags_list.append(product_subcategory)
                 tags = ', '.join(tags_list)
                 
-                # Créer la ligne de base
-                base_row = {
-                    'Handle': handle,
-                    'Title': formatted_title,
-                    'Body (HTML)': description,
-                    'Vendor': formatted_vendor,
-                    'Type': category,
-                    'Tags': tags,
-                    'Published': published_value,
-                    'Option1 Name': 'Taille' if variant_size else '',
-                    'Option1 Value': variant_size,
-                    'Option2 Name': 'Couleur' if variant_color else '',
-                    'Option2 Value': variant_color,
-                    'Option3 Name': 'Matière' if variant_material else '',
-                    'Option3 Value': variant_material,
-                    'Variant SKU': variant_sku,
-                    'Variant Grams': '',
-                    'Variant Inventory Tracker': 'shopify',
-                    'Variant Inventory Policy': 'deny',
-                    'Variant Fulfillment Service': 'manual',
-                    'Variant Price': variant_price_pvc,
-                    'Variant Compare At Price': variant_price_pa,
-                    'Variant Requires Shipping': 'TRUE',
-                    'Variant Taxable': 'TRUE',
-                    'Variant Barcode': variant_gencode,
-                    'Image Src': '',
-                    'Image Position': '',
-                    'Image Alt Text': '',
-                    'Gift Card': 'FALSE',
-                    'SEO Title': '',
-                    'SEO Description': '',
-                    'Google Shopping / Google Product Category': '',
-                    'Google Shopping / Gender': '',
-                    'Google Shopping / Age Group': '',
-                    'Google Shopping / MPN': '',
-                    'Google Shopping / AdWords Grouping': '',
-                    'Google Shopping / AdWords Labels': '',
-                    'Google Shopping / Condition': '',
-                    'Google Shopping / Custom Product': '',
-                    'Google Shopping / Custom Label 0': '',
-                    'Google Shopping / Custom Label 1': '',
-                    'Google Shopping / Custom Label 2': '',
-                    'Google Shopping / Custom Label 3': '',
-                    'Google Shopping / Custom Label 4': '',
-                    'Variant Image': '',
-                    'Variant Weight Unit': 'kg',
-                    'Variant Tax Code': '',
-                    'Cost per item': '',
-                    'Price / International': '',
-                    'Compare At Price / International': '',
-                    'Status': 'active',
-                    'On hand (new)': str(variant_stock),
-                    'Variant Inventory Qty': str(variant_stock),
-                }
+                # Créer une ligne vide avec toutes les colonnes configurées
+                base_row = {col: '' for col in shopify_columns}
                 
-                # Ajouter une ligne pour le variant sans image
-                rows.append(base_row.copy())
+                # Remplir les champs de base (première ligne du produit/variant)
+                base_row['Handle'] = handle
+                base_row['Title'] = formatted_title
+                base_row['Body (HTML)'] = description
+                base_row['Vendor'] = formatted_vendor
+                base_row['Product Category'] = ''
+                base_row['Type'] = category
+                base_row['Tags'] = tags
+                base_row['Published'] = published_value
+                base_row['Option1 Name'] = 'Taille' if variant_size else ''
+                base_row['Option1 Value'] = variant_size
+                base_row['Option2 Name'] = 'Couleur' if variant_color else ''
+                base_row['Option2 Value'] = variant_color
+                base_row['Option3 Name'] = 'Matière' if variant_material else ''
+                base_row['Option3 Value'] = variant_material
+                base_row['Variant SKU'] = variant_sku
+                base_row['Variant Grams'] = ''
+                base_row['Variant Inventory Tracker'] = 'shopify'
+                base_row['Variant Inventory Qty'] = str(variant_stock)
+                base_row['Variant Inventory Policy'] = 'deny'
+                base_row['Variant Fulfillment Service'] = 'manual'
+                base_row['Variant Price'] = variant_price_pvc  # LE PRIX VA ICI
+                base_row['Variant Compare At Price'] = variant_price_pa if variant_price_pa else ''
+                base_row['Variant Requires Shipping'] = 'TRUE'
+                base_row['Variant Taxable'] = 'TRUE'
+                base_row['Variant Barcode'] = variant_gencode
+                base_row['Gift Card'] = 'FALSE'
+                base_row['SEO Title'] = ''
+                base_row['SEO Description'] = ''
+                base_row['Google Shopping / Google Product Category'] = ''
+                base_row['Google Shopping / Gender'] = ''
+                base_row['Google Shopping / Age Group'] = ''
+                base_row['Google Shopping / MPN'] = ''
+                base_row['Google Shopping / Condition'] = ''
+                base_row['Google Shopping / Custom Product'] = ''
+                base_row['Variant Image'] = ''
+                base_row['Variant Weight Unit'] = 'kg'
+                base_row['Variant Tax Code'] = ''
+                base_row['Cost per item'] = ''
+                base_row['Included / United States'] = ''
+                base_row['Price / United States'] = ''
+                base_row['Compare At Price / United States'] = ''
+                base_row['Included / International'] = ''
+                base_row['Price / International'] = ''
+                base_row['Compare At Price / International'] = ''
+                base_row['Status'] = 'active'
+                base_row['location'] = location_name  # Emplacement Shopify
+                base_row['On hand (new)'] = str(variant_stock)  # Stock (quantité disponible)
+                base_row['On hand (current)'] = ''  # Champ vide
                 
-                # Ajouter une ligne par image
-                if image_urls:
-                    for img_idx, image_url in enumerate(image_urls, 1):
-                        image_row = base_row.copy()
-                        image_row['Image Src'] = image_url
-                        image_row['Image Position'] = str(img_idx)
-                        image_row['Image Alt Text'] = formatted_title
-                        rows.append(image_row)
+                # Pour le premier variant seulement, ajouter les images
+                if variant_idx == 0:
+                    if not image_urls:
+                        # Si pas d'images, créer une seule ligne sans images
+                        rows.append(base_row.copy())
+                    else:
+                        # Créer une ligne par image pour le premier variant
+                        for img_idx, image_url in enumerate(image_urls, start=1):
+                            row = base_row.copy()
+                            
+                            if img_idx == 1:
+                                # Première image : garder toutes les infos produit et variant (déjà dans base_row)
+                                pass
+                            else:
+                                # Images suivantes : Vider TOUS les champs sauf Handle, Image Src, Image Position, Image Alt Text
+                                # Shopify associe les images au produit via le Handle uniquement
+                                for col in shopify_columns:
+                                    if col not in ['Handle', 'Image Src', 'Image Position', 'Image Alt Text']:
+                                        row[col] = ''
+                            
+                            # Ajouter les informations de l'image
+                            row['Image Src'] = image_url
+                            row['Image Position'] = img_idx
+                            row['Image Alt Text'] = formatted_title
+                            
+                            rows.append(row)
+                else:
+                    # Pour les autres variants, créer une seule ligne sans images (les images sont déjà définies)
+                    rows.append(base_row.copy())
         
         # Créer le DataFrame
         df = pd.DataFrame(rows)
@@ -224,15 +252,29 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
-            # Inclure la sous-catégorie dans le nom du fichier si spécifiée
-            if subcategory:
-                subcategory_slug = slugify(subcategory)
-                filename = f"shopify_import_cristel_{subcategory_slug}_{timestamp}.csv"
+            # Inclure la catégorie et/ou sous-catégorie dans le nom du fichier
+            logger.info(f"Construction du nom de fichier - subcategory: {subcategory}, categories: {categories}")
+            
+            # Si une sous-catégorie est fournie, extraire aussi la catégorie du premier produit
+            if subcategory and products:
+                first_product_category = products[0].get('category', '')
+                if first_product_category:
+                    logger.info(f"→ Utilisation de catégorie-sous-catégorie: {first_product_category} - {subcategory}")
+                    category_slug = slugify(first_product_category)
+                    subcategory_slug = slugify(subcategory)
+                    filename = f"shopify_import_cristel_{category_slug}-{subcategory_slug}_{timestamp}.csv"
+                else:
+                    logger.info(f"→ Utilisation de la sous-catégorie: {subcategory}")
+                    subcategory_slug = slugify(subcategory)
+                    filename = f"shopify_import_cristel_{subcategory_slug}_{timestamp}.csv"
             elif categories and len(categories) == 1:
+                logger.info(f"→ Utilisation de la catégorie: {categories[0]}")
                 category_slug = slugify(categories[0])
                 filename = f"shopify_import_cristel_{category_slug}_{timestamp}.csv"
             else:
+                logger.info("→ Aucune catégorie/sous-catégorie - nom générique")
                 filename = f"shopify_import_cristel_{timestamp}.csv"
+            logger.info(f"→ Nom du fichier final: {filename}")
             
             output_file = os.path.join(OUTPUT_DIR, filename)
         
@@ -243,6 +285,8 @@ def generate_csv_from_db(output_file=None, output_db='cristel_products.db',
         logger.info(f"  Produits: {len(products)}")
         logger.info(f"  Lignes CSV: {len(df)}")
         logger.info(f"{'='*60}")
+        
+        return output_file  # Retourner le chemin du fichier généré
         
     finally:
         db.close()

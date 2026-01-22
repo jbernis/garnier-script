@@ -107,12 +107,49 @@ class GarnierDB:
             )
         ''')
         
+        # Table des gammes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS gammes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT,
+                url TEXT NOT NULL UNIQUE,
+                category TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                retry_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Table de liaison gamme-products
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS gamme_products (
+                gamme_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (gamme_id, product_id),
+                FOREIGN KEY (gamme_id) REFERENCES gammes(id) ON DELETE CASCADE,
+                FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # Migration : Ajouter retry_count si la colonne n'existe pas
+        try:
+            cursor.execute('ALTER TABLE gammes ADD COLUMN retry_count INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # La colonne existe déjà
+        
         # Index pour améliorer les performances
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_variant_status ON product_variants(status)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_variant_code_vl ON product_variants(code_vl)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_variant_product ON product_variants(product_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_product_code ON products(product_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_product_handle ON products(handle)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gamme_url ON gammes(url)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gamme_status ON gammes(status)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gamme_category ON gammes(category)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gamme_products_gamme ON gamme_products(gamme_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_gamme_products_product ON gamme_products(product_id)')
         
         self.conn.commit()
         logger.info(f"Base de données initialisée: {self.db_path}")
@@ -839,6 +876,366 @@ class GarnierDB:
         
         return stats
     
+    # ========== Méthodes pour les gammes ==========
+    
+    def add_gamme(self, url: str, category: str, name: str = None, status: str = None) -> int:
+        """
+        Ajoute ou met à jour une gamme.
+        
+        Logique automatique : Si name est NULL ou vide → status='error' automatiquement.
+        Si name existe → status='pending' (ou celui fourni).
+        
+        Args:
+            url: URL unique de la gamme
+            category: Catégorie de la gamme
+            name: Nom de la gamme (None si en erreur)
+            status: Statut explicite (optionnel, sera déterminé automatiquement si None)
+        
+        Returns:
+            gamme_id: ID de la gamme (nouveau ou existant)
+        """
+        cursor = self.conn.cursor()
+        
+        # Déterminer le status automatiquement si name est NULL ou vide
+        if not name or not name.strip():
+            final_status = 'error'
+            final_name = None
+        else:
+            # Si name existe, utiliser le status fourni ou 'pending' par défaut
+            final_status = status if status else 'pending'
+            final_name = name.strip()
+        
+        # Vérifier si la gamme existe déjà
+        cursor.execute('SELECT id, status, name FROM gammes WHERE url = ?', (url,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            gamme_id = existing['id']
+            existing_status = existing['status']
+            existing_name = existing['name']
+            
+            # Si la gamme était en erreur et qu'on a maintenant un nom, la mettre à jour
+            if existing_status == 'error' and final_name:
+                cursor.execute('''
+                    UPDATE gammes 
+                    SET name = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (final_name, 'pending', gamme_id))
+                self.conn.commit()
+                logger.debug(f"Gamme {url} mise à jour (était en erreur, maintenant avec nom)")
+                return gamme_id
+            
+            # Si la gamme existe déjà, mettre à jour seulement si nécessaire
+            if existing_name != final_name or existing_status != final_status:
+                cursor.execute('''
+                    UPDATE gammes 
+                    SET name = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (final_name, final_status, gamme_id))
+                self.conn.commit()
+                logger.debug(f"Gamme {url} mise à jour")
+            
+            return gamme_id
+        
+        # La gamme n'existe pas, l'ajouter
+        try:
+            cursor.execute('''
+                INSERT INTO gammes (name, url, category, status)
+                VALUES (?, ?, ?, ?)
+            ''', (final_name, url, category, final_status))
+            self.conn.commit()
+            gamme_id = cursor.lastrowid
+            logger.debug(f"Nouvelle gamme ajoutée: {url} (gamme_id={gamme_id}, status={final_status})")
+            return gamme_id
+        except sqlite3.IntegrityError as e:
+            # Race condition : la gamme a été ajoutée entre temps
+            cursor.execute('SELECT id FROM gammes WHERE url = ?', (url,))
+            row = cursor.fetchone()
+            if row:
+                logger.debug(f"Gamme {url} existe déjà (race condition)")
+                return row['id']
+            raise
+    
+    def get_gamme_by_url(self, url: str) -> Optional[Dict]:
+        """Récupère une gamme par son URL."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM gammes WHERE url = ?', (url,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    
+    def get_gamme_by_id(self, gamme_id: int) -> Optional[Dict]:
+        """Récupère une gamme par son ID."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM gammes WHERE id = ?', (gamme_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    
+    def get_gammes_by_status(self, status: Optional[str] = None, category: Optional[str] = None) -> List[Dict]:
+        """
+        Récupère les gammes filtrées par statut.
+        
+        Args:
+            status: 'pending', 'processing', 'completed', 'error', ou None pour toutes
+            category: Filtrer par catégorie (optionnel)
+        
+        Returns:
+            Liste des gammes correspondantes
+        """
+        cursor = self.conn.cursor()
+        query = 'SELECT * FROM gammes WHERE 1=1'
+        params = []
+        
+        if status:
+            query += ' AND status = ?'
+            params.append(status)
+        
+        if category:
+            query += ' AND category = ?'
+            params.append(category)
+        
+        query += ' ORDER BY updated_at DESC'
+        
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+    
+    def get_error_gammes(self, category: Optional[str] = None) -> List[Dict]:
+        """
+        Récupère toutes les gammes en erreur.
+        Une gamme est en erreur si status='error' OU name IS NULL.
+        
+        Args:
+            category: Filtrer par catégorie (optionnel)
+        
+        Returns:
+            Liste des gammes en erreur
+        """
+        cursor = self.conn.cursor()
+        query = '''
+            SELECT * FROM gammes 
+            WHERE status = 'error' OR name IS NULL
+        '''
+        params = []
+        
+        if category:
+            query += ' AND category = ?'
+            params.append(category)
+        
+        query += ' ORDER BY updated_at DESC'
+        
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
+    
+    def link_gamme_to_product(self, gamme_id: int, product_id: int):
+        """Lie un produit à une gamme dans la table gamme_products."""
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT OR IGNORE INTO gamme_products (gamme_id, product_id)
+                VALUES (?, ?)
+            ''', (gamme_id, product_id))
+            self.conn.commit()
+            logger.debug(f"Produit {product_id} lié à la gamme {gamme_id}")
+        except sqlite3.IntegrityError:
+            # Le lien existe déjà, c'est OK
+            pass
+    
+    def get_gamme_products(self, gamme_id: int) -> List[int]:
+        """Récupère tous les product_ids d'une gamme."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT product_id FROM gamme_products 
+            WHERE gamme_id = ?
+            ORDER BY created_at
+        ''', (gamme_id,))
+        return [row['product_id'] for row in cursor.fetchall()]
+    
+    def update_gamme_status(self, gamme_id: int, status: str):
+        """Met à jour le statut d'une gamme."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            UPDATE gammes 
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (status, gamme_id))
+        self.conn.commit()
+    
+    def update_all_gammes_status(self, category: Optional[str] = None) -> int:
+        """
+        Met à jour le statut de TOUTES les gammes après traitement.
+        Utilise update_gamme_status_if_all_products_processed() pour chaque gamme.
+        
+        Args:
+            category: Filtrer par catégorie (optionnel)
+        
+        Returns:
+            Nombre de gammes mises à jour
+        """
+        cursor = self.conn.cursor()
+        
+        if category:
+            cursor.execute('SELECT DISTINCT id FROM gammes WHERE category = ?', (category,))
+        else:
+            cursor.execute('SELECT DISTINCT id FROM gammes')
+        
+        gamme_ids = [row['id'] for row in cursor.fetchall()]
+        
+        updated_count = 0
+        for gamme_id in gamme_ids:
+            if self.update_gamme_status_if_all_products_processed(gamme_id):
+                updated_count += 1
+        
+        return updated_count
+    
+    def update_gamme_status_if_all_products_processed(self, gamme_id: int) -> bool:
+        """
+        Vérifie et met à jour le statut d'une gamme si tous ses produits sont traités.
+        
+        Logique :
+        - Si tous les produits de la gamme ont au moins 1 variant completed → gamme 'completed'
+        - Si tous les produits sont en erreur → gamme 'error'
+        - Sinon → gamme reste 'pending' ou 'processing'
+        
+        Args:
+            gamme_id: ID de la gamme à vérifier
+            
+        Returns:
+            True si le statut a été mis à jour, False sinon
+        """
+        cursor = self.conn.cursor()
+        
+        # Récupérer tous les produits de cette gamme via gamme_products
+        cursor.execute('''
+            SELECT p.id, p.status, p.product_code
+            FROM products p
+            INNER JOIN gamme_products gp ON p.id = gp.product_id
+            WHERE gp.gamme_id = ?
+        ''', (gamme_id,))
+        
+        products = cursor.fetchall()
+        
+        # Si aucun produit lié à cette gamme, ne rien faire
+        if not products:
+            logger.debug(f"Gamme {gamme_id}: Aucun produit trouvé, statut inchangé")
+            return False
+        
+        total_products = len(products)
+        completed_products = 0
+        error_products = 0
+        
+        # Pour chaque produit, vérifier s'il a au moins 1 variant completed
+        for product in products:
+            product_id = product['id']
+            product_status = product['status']
+            
+            # Vérifier si le produit a au moins un variant completed
+            cursor.execute('''
+                SELECT COUNT(*) as count
+                FROM product_variants
+                WHERE product_id = ? AND status = 'completed'
+            ''', (product_id,))
+            
+            completed_variants = cursor.fetchone()['count']
+            
+            if completed_variants > 0:
+                completed_products += 1
+            elif product_status == 'error':
+                error_products += 1
+        
+        # Déterminer le nouveau statut de la gamme
+        current_status = None
+        cursor.execute('SELECT status FROM gammes WHERE id = ?', (gamme_id,))
+        row = cursor.fetchone()
+        if row:
+            current_status = row['status']
+        
+        new_status = None
+        
+        # Si tous les produits ont au moins 1 variant completed → gamme completed
+        if completed_products == total_products:
+            new_status = 'completed'
+        # Si tous les produits sont en erreur → gamme error
+        elif error_products == total_products:
+            new_status = 'error'
+        # Sinon, garder pending ou processing (ne pas changer si déjà processing)
+        else:
+            # Pas de changement, la gamme est encore en cours
+            return False
+        
+        # Mettre à jour seulement si le statut a changé
+        if new_status and new_status != current_status:
+            cursor.execute('''
+                UPDATE gammes 
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (new_status, gamme_id))
+            self.conn.commit()
+            logger.info(f"✓ Gamme {gamme_id} passée à '{new_status}' ({completed_products}/{total_products} produits avec variants completed)")
+            return True
+        
+        return False
+    
+    def mark_gamme_error(self, gamme_id: int):
+        """Marque une gamme en erreur (met status='error' et name=NULL si nécessaire)."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            UPDATE gammes 
+            SET status = 'error', name = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (gamme_id,))
+        self.conn.commit()
+    
+    def increment_gamme_retry(self, gamme_id: int):
+        """Incrémente le compteur de retry d'une gamme."""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            UPDATE gammes 
+            SET retry_count = retry_count + 1, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (gamme_id,))
+        self.conn.commit()
+    
+    def get_category_gamme_stats(self, category: str) -> Dict:
+        """
+        Récupère les statistiques des gammes pour une catégorie.
+        
+        Returns:
+            {
+                'completed': 45,
+                'pending': 3,
+                'error': 2,
+                'total': 50
+            }
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT 
+                status,
+                COUNT(*) as count
+            FROM gammes
+            WHERE category = ?
+            GROUP BY status
+        ''', (category,))
+        
+        stats = {'completed': 0, 'processing': 0, 'pending': 0, 'error': 0, 'total': 0}
+        for row in cursor.fetchall():
+            status = row['status'] or 'pending'
+            count = row['count']
+            if status in stats:
+                stats[status] = count
+            stats['total'] += count
+        
+        # Compter aussi les gammes avec name IS NULL comme erreur
+        cursor.execute('''
+            SELECT COUNT(*) as count
+            FROM gammes
+            WHERE category = ? AND name IS NULL
+        ''', (category,))
+        null_count = cursor.fetchone()['count']
+        if null_count > stats['error']:
+            stats['error'] = null_count
+        
+        return stats
+    
     def close(self):
         """Ferme la connexion à la base de données."""
         if self.conn:
@@ -850,4 +1247,223 @@ class GarnierDB:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+    
+    # ========== Méthodes de nettoyage ==========
+    
+    def delete_all(self) -> int:
+        """
+        Supprime tous les produits, variants, images et gammes de la base de données.
+        
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products')
+        count = cursor.fetchone()[0]
+        
+        # Supprimer toutes les tables (CASCADE va supprimer les dépendances)
+        cursor.execute('DELETE FROM gammes')
+        cursor.execute('DELETE FROM products')
+        
+        self.conn.commit()
+        logger.info(f"Base de données vidée: {count} produits supprimés")
+        
+        return count
+    
+    def delete_by_category(self, category: str) -> int:
+        """
+        Supprime tous les produits d'une catégorie.
+        
+        Args:
+            category: Nom de la catégorie
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products WHERE category = ?', (category,))
+        count = cursor.fetchone()[0]
+        
+        # Supprimer (CASCADE va supprimer les variants et images)
+        cursor.execute('DELETE FROM products WHERE category = ?', (category,))
+        self.conn.commit()
+        
+        logger.info(f"Catégorie '{category}' supprimée: {count} produits")
+        
+        return count
+    
+    def delete_by_gamme(self, gamme: str) -> int:
+        """
+        Supprime tous les produits d'une gamme.
+        
+        Args:
+            gamme: Nom de la gamme
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        # Utiliser LIKE pour matcher même si la gamme est malformée
+        cursor.execute('SELECT COUNT(*) FROM products WHERE gamme LIKE ?', (f'%{gamme}%',))
+        count = cursor.fetchone()[0]
+        
+        # Supprimer (CASCADE va supprimer les variants et images)
+        cursor.execute('DELETE FROM products WHERE gamme LIKE ?', (f'%{gamme}%',))
+        self.conn.commit()
+        
+        logger.info(f"Gamme '{gamme}' supprimée: {count} produits")
+        
+        return count
+    
+    def delete_by_title(self, title: str) -> int:
+        """
+        Supprime les produits dont le titre contient la chaîne spécifiée (insensible à la casse).
+        
+        Args:
+            title: Chaîne à rechercher dans le titre
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products WHERE title LIKE ? COLLATE NOCASE', (f'%{title}%',))
+        count = cursor.fetchone()[0]
+        
+        # Supprimer (CASCADE va supprimer les variants et images)
+        cursor.execute('DELETE FROM products WHERE title LIKE ? COLLATE NOCASE', (f'%{title}%',))
+        self.conn.commit()
+        
+        logger.info(f"Produits avec titre contenant '{title}' supprimés: {count} produits")
+        
+        return count
+    
+    def delete_by_sku(self, sku: str) -> int:
+        """
+        Supprime les variants avec le SKU spécifié et leurs produits si plus aucun variant.
+        
+        Args:
+            sku: SKU exact à supprimer
+            
+        Returns:
+            Nombre de variants supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Trouver les variants avec ce SKU
+        cursor.execute('SELECT id, product_id FROM product_variants WHERE sku = ?', (sku,))
+        variants = cursor.fetchall()
+        
+        if not variants:
+            logger.info(f"Aucun variant trouvé avec le SKU '{sku}'")
+            return 0
+        
+        # Supprimer les variants
+        cursor.execute('DELETE FROM product_variants WHERE sku = ?', (sku,))
+        count = len(variants)
+        
+        # Pour chaque produit, vérifier s'il a encore des variants
+        product_ids = set(v['product_id'] for v in variants)
+        for product_id in product_ids:
+            cursor.execute('SELECT COUNT(*) FROM product_variants WHERE product_id = ?', (product_id,))
+            remaining = cursor.fetchone()[0]
+            
+            # Si plus de variants, supprimer le produit
+            if remaining == 0:
+                cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
+        
+        self.conn.commit()
+        logger.info(f"Variants avec SKU '{sku}' supprimés: {count} variants")
+        
+        return count
+    
+    def count_products_by_category(self, category: str) -> int:
+        """
+        Compte les produits dans une catégorie.
+        
+        Args:
+            category: Nom de la catégorie
+            
+        Returns:
+            Nombre de produits
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE category = ?', (category,))
+        return cursor.fetchone()[0]
+    
+    def count_products_by_gamme(self, gamme: str) -> int:
+        """
+        Compte les produits dans une gamme.
+        
+        Args:
+            gamme: Nom de la gamme
+            
+        Returns:
+            Nombre de produits
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE gamme LIKE ?', (f'%{gamme}%',))
+        return cursor.fetchone()[0]
+    
+    def count_products_by_title(self, title: str) -> int:
+        """
+        Compte les produits dont le titre contient la chaîne spécifiée.
+        
+        Args:
+            title: Chaîne à rechercher dans le titre
+            
+        Returns:
+            Nombre de produits
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE title LIKE ? COLLATE NOCASE', (f'%{title}%',))
+        return cursor.fetchone()[0]
+    
+    def count_variants_by_sku(self, sku: str) -> int:
+        """
+        Compte les variants avec le SKU spécifié.
+        
+        Args:
+            sku: SKU exact à rechercher
+            
+        Returns:
+            Nombre de variants
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM product_variants WHERE sku = ?', (sku,))
+        return cursor.fetchone()[0]
+    
+    def delete_by_product_ids(self, product_ids: list) -> int:
+        """
+        Supprime les produits spécifiés par leurs IDs.
+        
+        Args:
+            product_ids: Liste des IDs de produits à supprimer
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        if not product_ids:
+            return 0
+        
+        cursor = self.conn.cursor()
+        
+        # Créer les placeholders pour la requête
+        placeholders = ','.join(['?'] * len(product_ids))
+        
+        # Supprimer les produits (CASCADE va supprimer les variants et images)
+        cursor.execute(f'DELETE FROM products WHERE id IN ({placeholders})', product_ids)
+        count = cursor.rowcount
+        
+        self.conn.commit()
+        logger.info(f"Produits sélectionnés supprimés: {count} produits")
+        
+        return count
 

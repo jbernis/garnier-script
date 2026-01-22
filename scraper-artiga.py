@@ -97,6 +97,7 @@ def get_selenium_driver(headless: bool = True):
 def extract_price_from_ajax_response(response_text: str) -> Optional[str]:
     """
     Extrait le prix depuis la réponse AJAX.
+    Priorité : prix régulier (regular-price) > prix courant (current-price-display)
     """
     try:
         # Essayer d'extraire depuis le JSON
@@ -105,8 +106,18 @@ def extract_price_from_ajax_response(response_text: str) -> Optional[str]:
         # Option 1: Extraire depuis product_prices (HTML)
         if 'product_prices' in data:
             prices_html = data['product_prices']
-            # Extraire le prix avec une expression régulière
-            price_match = re.search(r'<span class="display-4 current-price-display price">\s*([^<]+)\s*<\/span>', prices_html)
+            
+            # PRIORITÉ 1: Chercher le prix régulier (pour les produits en promotion)
+            # Format: <span class="regular-price">115,00 €</span>
+            regular_price_match = re.search(r'<span class="regular-price">\s*([^<]+)\s*<\/span>', prices_html)
+            if regular_price_match:
+                return regular_price_match.group(1).strip()
+            
+            # PRIORITÉ 2: Chercher le prix courant (pour les produits sans promotion)
+            # Format: <span class="display-4 current-price-display price">129,00 €</span>
+            # OU: <span class="display-4 current-price-display price current-price-discount">92,00 €</span>
+            # Note: La regex accepte maintenant des classes supplémentaires après "price"
+            price_match = re.search(r'<span class="display-4 current-price-display price[^"]*">\s*([^<]+)\s*<\/span>', prices_html)
             if price_match:
                 return price_match.group(1).strip()
         
@@ -120,7 +131,13 @@ def extract_price_from_ajax_response(response_text: str) -> Optional[str]:
         
     except json.JSONDecodeError:
         # Si ce n'est pas du JSON valide, essayer d'extraire directement
-        price_match = re.search(r'<span class="display-4 current-price-display price">\s*([^<]+)\s*<\/span>', response_text)
+        # Même logique : d'abord regular-price, puis current-price-display
+        regular_price_match = re.search(r'<span class="regular-price">\s*([^<]+)\s*<\/span>', response_text)
+        if regular_price_match:
+            return regular_price_match.group(1).strip()
+        
+        # Regex flexible pour accepter des classes supplémentaires
+        price_match = re.search(r'<span class="display-4 current-price-display price[^"]*">\s*([^<]+)\s*<\/span>', response_text)
         if price_match:
             return price_match.group(1).strip()
     
@@ -830,7 +847,352 @@ def get_products_from_subcategory(driver: Optional[webdriver.Chrome], session: r
         return []
 
 
-def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Session, product_url: str, product_name: str, headless: bool = True) -> tuple:
+def extract_product_code_strict(soup: BeautifulSoup, driver: Optional[webdriver.Chrome]) -> tuple:
+    """
+    Extrait le product_code (SKU) depuis <div class="product-reference"><span>MACOMANIM_1494</span></div>
+    Retourne (code, found) où found est booléen.
+    """
+    try:
+        # Chercher <div class="product-reference">
+        ref_div = soup.find('div', class_='product-reference')
+        if ref_div:
+            # Chercher le <span> à l'intérieur
+            ref_span = ref_div.find('span')
+            if ref_span:
+                code = ref_span.get_text(strip=True)
+                if code:
+                    return (code, True)
+        
+        # Si pas trouvé avec BeautifulSoup et qu'on a un driver, essayer avec Selenium
+        if driver:
+            try:
+                ref_elem = driver.find_element(By.CSS_SELECTOR, 'div.product-reference span')
+                code = ref_elem.text.strip()
+                if code:
+                    return (code, True)
+            except NoSuchElementException:
+                pass
+        
+        return ("non trouvé", False)
+    except Exception as e:
+        logger.debug(f"Erreur lors de l'extraction du product_code: {e}")
+        return ("non trouvé", False)
+
+
+def extract_title_strict(soup: BeautifulSoup, driver: Optional[webdriver.Chrome]) -> tuple:
+    """
+    Extrait le titre depuis <h1 class="display-2"> sous <section id="main">
+    Retourne (title, found).
+    """
+    try:
+        # Chercher <section id="main">
+        main_section = soup.find('section', id='main')
+        if main_section:
+            # Chercher <h1 class="display-2"> dans cette section
+            h1 = main_section.find('h1', class_='display-2')
+            if h1:
+                title = h1.get_text(strip=True)
+                if title:
+                    return (title, True)
+        
+        # Si pas trouvé avec BeautifulSoup et qu'on a un driver, essayer avec Selenium
+        if driver:
+            try:
+                h1_elem = driver.find_element(By.CSS_SELECTOR, 'section#main h1.display-2')
+                title = h1_elem.text.strip()
+                if title:
+                    return (title, True)
+            except NoSuchElementException:
+                pass
+        
+        return ("non trouvé", False)
+    except Exception as e:
+        logger.debug(f"Erreur lors de l'extraction du titre: {e}")
+        return ("non trouvé", False)
+
+
+def extract_description_strict(soup: BeautifulSoup, driver: Optional[webdriver.Chrome]) -> tuple:
+    """
+    Combine description courte + fiche technique.
+    Description courte: <div id="product-description-short-{variable}"><p>...</p></div> sous <div class="product-information">
+    Fiche technique: <section class="product-features"> avec titre "Fiche technique" → convertir <dl class="data-sheet"> en HTML
+    Retourne (description_html, found).
+    """
+    try:
+        description_parts = []
+        found_any = False
+        
+        # Partie 1: Description courte
+        product_info = soup.find('div', class_='product-information')
+        if product_info:
+            # Chercher tous les divs avec id commençant par "product-description-short-"
+            desc_divs = product_info.find_all('div', id=re.compile(r'product-description-short-\d+'))
+            for desc_div in desc_divs:
+                p_tag = desc_div.find('p')
+                if p_tag:
+                    desc_html = str(p_tag)
+                    description_parts.append(desc_html)
+                    found_any = True
+        
+        # Si pas trouvé avec BeautifulSoup et qu'on a un driver, essayer avec Selenium
+        if not found_any and driver:
+            try:
+                product_info_elem = driver.find_element(By.CSS_SELECTOR, 'div.product-information')
+                desc_divs = product_info_elem.find_elements(By.CSS_SELECTOR, 'div[id^="product-description-short-"]')
+                for desc_div in desc_divs:
+                    p_tags = desc_div.find_elements(By.TAG_NAME, 'p')
+                    for p_tag in p_tags:
+                        desc_html = p_tag.get_attribute('outerHTML')
+                        if desc_html:
+                            description_parts.append(desc_html)
+                            found_any = True
+            except NoSuchElementException:
+                pass
+        
+        # Partie 2: Fiche technique
+        tech_sheet_found = False
+        features_sections = soup.find_all('section', class_='product-features')
+        for section in features_sections:
+            # Vérifier si le titre est "Fiche technique"
+            h6 = section.find('p', class_='h6')
+            if h6 and 'fiche technique' in h6.get_text(strip=True).lower():
+                # Trouver le <dl class="data-sheet">
+                dl = section.find('dl', class_='data-sheet')
+                if dl:
+                    # Convertir en HTML (table)
+                    tech_html = '<table class="data-sheet">'
+                    dts = dl.find_all('dt')
+                    dds = dl.find_all('dd')
+                    for dt, dd in zip(dts, dds):
+                        tech_html += f'<tr><th>{dt.get_text(strip=True)}</th><td>{dd.get_text(strip=True)}</td></tr>'
+                    tech_html += '</table>'
+                    description_parts.append(tech_html)
+                    tech_sheet_found = True
+                    found_any = True
+                    break
+        
+        # Si pas trouvé avec BeautifulSoup et qu'on a un driver, essayer avec Selenium
+        if not tech_sheet_found and driver:
+            try:
+                features_sections_elem = driver.find_elements(By.CSS_SELECTOR, 'section.product-features')
+                for section in features_sections_elem:
+                    try:
+                        h6 = section.find_element(By.CSS_SELECTOR, 'p.h6')
+                        if 'fiche technique' in h6.text.lower():
+                            dl = section.find_element(By.CSS_SELECTOR, 'dl.data-sheet')
+                            if dl:
+                                # Convertir en HTML
+                                tech_html = '<table class="data-sheet">'
+                                dts = dl.find_elements(By.TAG_NAME, 'dt')
+                                dds = dl.find_elements(By.TAG_NAME, 'dd')
+                                for dt, dd in zip(dts, dds):
+                                    tech_html += f'<tr><th>{dt.text.strip()}</th><td>{dd.text.strip()}</td></tr>'
+                                tech_html += '</table>'
+                                description_parts.append(tech_html)
+                                found_any = True
+                                break
+                    except NoSuchElementException:
+                        continue
+            except Exception:
+                pass
+        
+        if found_any:
+            description_html = '\n'.join(description_parts)
+            return (description_html, True)
+        
+        return ("non trouvé", False)
+    except Exception as e:
+        logger.debug(f"Erreur lors de l'extraction de la description: {e}")
+        return ("non trouvé", False)
+
+
+def extract_ean13_strict(soup: BeautifulSoup, driver: Optional[webdriver.Chrome], product_code: str) -> tuple:
+    """
+    Extrait l'EAN13 depuis <section class="product-features"> avec titre "Références spécifiques"
+    → <dt class="name">ean13</dt><dd class="value">3661842475622</dd>
+    Si EAN13 non trouvé, utilise product_code comme fallback.
+    Retourne (ean13, found).
+    """
+    try:
+        features_sections = soup.find_all('section', class_='product-features')
+        for section in features_sections:
+            # Vérifier si le titre est "Références spécifiques"
+            h6 = section.find('p', class_='h6')
+            if h6 and 'références spécifiques' in h6.get_text(strip=True).lower():
+                # Chercher <dt class="name">ean13</dt>
+                dts = section.find_all('dt', class_='name')
+                for dt in dts:
+                    if 'ean13' in dt.get_text(strip=True).lower():
+                        # Trouver le <dd> suivant
+                        dd = dt.find_next_sibling('dd', class_='value')
+                        if dd:
+                            ean13_text = dd.get_text(strip=True)
+                            # Vérifier que c'est un nombre de 13 chiffres
+                            ean13_match = re.search(r'(\d{13})', ean13_text)
+                            if ean13_match:
+                                return (ean13_match.group(1), True)
+        
+        # Si pas trouvé avec BeautifulSoup et qu'on a un driver, essayer avec Selenium
+        if driver:
+            try:
+                features_sections_elem = driver.find_elements(By.CSS_SELECTOR, 'section.product-features')
+                for section in features_sections_elem:
+                    try:
+                        h6 = section.find_element(By.CSS_SELECTOR, 'p.h6')
+                        if 'références spécifiques' in h6.text.lower():
+                            dts = section.find_elements(By.CSS_SELECTOR, 'dt.name')
+                            for dt in dts:
+                                if 'ean13' in dt.text.lower():
+                                    dd = dt.find_element(By.XPATH, 'following-sibling::dd[@class="value"]')
+                                    if dd:
+                                        ean13_text = dd.text.strip()
+                                        ean13_match = re.search(r'(\d{13})', ean13_text)
+                                        if ean13_match:
+                                            return (ean13_match.group(1), True)
+                    except NoSuchElementException:
+                        continue
+            except Exception:
+                pass
+        
+        # Fallback: utiliser product_code si disponible
+        if product_code and product_code != "non trouvé":
+            return (product_code, False)  # found=False car c'est un fallback
+        
+        return ("non trouvé", False)
+    except Exception as e:
+        logger.debug(f"Erreur lors de l'extraction de l'EAN13: {e}")
+        # Fallback: utiliser product_code si disponible
+        if product_code and product_code != "non trouvé":
+            return (product_code, False)
+        return ("non trouvé", False)
+
+
+def get_ajax_product_details(driver: webdriver.Chrome) -> Dict:
+    """
+    Intercepte les réponses AJAX contenant product_details ou product-details
+    pour extraire SKU et gencode.
+    Retourne dict avec 'sku' et 'gencode' si trouvés.
+    """
+    product_details = {}
+    
+    try:
+        # Récupérer les logs de performance
+        logs = driver.get_log('performance')
+        
+        for log in logs:
+            try:
+                # Analyser le log
+                log_data = json.loads(log['message'])['message']
+                
+                # Vérifier si c'est une réponse de requête réseau
+                if log_data['method'] == 'Network.responseReceived':
+                    request_id = log_data['params']['requestId']
+                    response_url = log_data['params']['response']['url']
+                    
+                    # Vérifier si l'URL contient product_details ou product-details
+                    if 'product_details' in response_url.lower() or 'product-details' in response_url.lower():
+                        try:
+                            # Récupérer le corps de la réponse
+                            response = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                            response_body = response.get('body', '')
+                            
+                            # Essayer de parser en JSON
+                            try:
+                                data = json.loads(response_body)
+                                
+                                # Extraire SKU
+                                if 'sku' in data and not product_details.get('sku'):
+                                    product_details['sku'] = str(data['sku']).strip()
+                                
+                                if 'reference' in data and not product_details.get('sku'):
+                                    product_details['sku'] = str(data['reference']).strip()
+                                
+                                # Extraire gencode/EAN13
+                                if 'ean13' in data and not product_details.get('gencode'):
+                                    ean13 = str(data['ean13']).strip()
+                                    ean13_match = re.search(r'(\d{13})', ean13)
+                                    if ean13_match:
+                                        product_details['gencode'] = ean13_match.group(1)
+                                
+                                if 'gencode' in data and not product_details.get('gencode'):
+                                    gencode = str(data['gencode']).strip()
+                                    gencode_match = re.search(r'(\d{13})', gencode)
+                                    if gencode_match:
+                                        product_details['gencode'] = gencode_match.group(1)
+                                
+                            except json.JSONDecodeError:
+                                # Si ce n'est pas du JSON, chercher dans le HTML
+                                # Chercher SKU dans le HTML
+                                sku_match = re.search(r'(?:sku|reference)[":\s]*([A-Z0-9_-]{5,})', response_body, re.I)
+                                if sku_match and not product_details.get('sku'):
+                                    product_details['sku'] = sku_match.group(1).strip()
+                                
+                                # Chercher EAN13 dans le HTML
+                                ean13_match = re.search(r'(?:ean13|gencode)[":\s]*(\d{13})', response_body, re.I)
+                                if ean13_match and not product_details.get('gencode'):
+                                    product_details['gencode'] = ean13_match.group(1)
+                                
+                        except Exception as e:
+                            logger.debug(f"Erreur lors de la récupération de la réponse AJAX product_details: {e}")
+                            continue
+                            
+            except Exception as e:
+                # Ignorer les erreurs de parsing
+                continue
+                
+    except Exception as e:
+        logger.debug(f"Erreur lors de la récupération des logs product_details: {e}")
+    
+    return product_details
+
+
+def extract_price_from_dom_no_variant(driver: webdriver.Chrome) -> tuple:
+    """
+    Extrait le prix depuis le DOM pour les produits sans variant.
+    Priorité: regular-price (produits en promotion) puis current-price (sans promotion).
+    Retourne (price, source).
+    """
+    try:
+        variant_price = None
+        source = None
+        
+        # PRIORITÉ 1: Chercher le prix régulier (pour les produits en promotion)
+        try:
+            regular_price_span = driver.find_element(By.CSS_SELECTOR, 'span.regular-price')
+            price_text = regular_price_span.text.strip()
+            price_text_clean = price_text.replace('\xa0', ' ').replace('€', '').replace('&nbsp;', ' ').strip()
+            price_match = re.search(r'([\d,]+\.?\d*)', price_text_clean.replace(' ', '').replace(',', '.'))
+            if price_match:
+                price_value = float(price_match.group(1).replace(',', '.'))
+                if 1 <= price_value <= 10000:
+                    variant_price = price_match.group(1).replace(',', '.')
+                    source = "regular-price"
+        except NoSuchElementException:
+            pass
+        
+        # PRIORITÉ 2: Si pas de prix régulier, chercher le prix courant
+        if not variant_price:
+            try:
+                current_price_div = driver.find_element(By.CSS_SELECTOR, 'div.current-price')
+                price_span = current_price_div.find_element(By.CSS_SELECTOR, 'span.current-price-display')
+                price_text = price_span.text.strip()
+                price_text_clean = price_text.replace('\xa0', ' ').replace('€', '').replace('&nbsp;', ' ').strip()
+                price_match = re.search(r'([\d,]+\.?\d*)', price_text_clean.replace(' ', '').replace(',', '.'))
+                if price_match:
+                    price_value = float(price_match.group(1).replace(',', '.'))
+                    if 1 <= price_value <= 10000:
+                        variant_price = price_match.group(1).replace(',', '.')
+                        source = "current-price-display"
+            except NoSuchElementException:
+                pass
+                
+        return (variant_price, source)
+    except Exception as e:
+        logger.debug(f"Erreur lors de l'extraction du prix depuis le DOM: {e}")
+        return (None, None)
+
+
+def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Session, product_url: str, product_name: str, headless: bool = True, category_name: str = "") -> tuple:
     """
     Extrait les détails complets d'un produit Artiga depuis sa page.
     Retourne un tuple (details_dict, driver, session).
@@ -856,257 +1218,50 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Extraire les données depuis JSON-LD (priorité)
-        json_ld_data = None
-        json_ld_script = soup.find('script', type='application/ld+json')
-        if json_ld_script:
-            try:
-                json_content = json_ld_script.string
-                if json_content:
-                    json_ld_data = json.loads(json_content)
-                    # Si c'est une liste, chercher le premier élément de type Product
-                    if isinstance(json_ld_data, list):
-                        for item in json_ld_data:
-                            if isinstance(item, dict) and item.get('@type') == 'Product':
-                                json_ld_data = item
-                                break
-                    # Si c'est un dict mais pas de @type Product, chercher dans le contenu
-                    elif isinstance(json_ld_data, dict) and json_ld_data.get('@type') != 'Product':
-                        # Chercher dans @graph si présent
-                        if '@graph' in json_ld_data:
-                            for item in json_ld_data['@graph']:
-                                if isinstance(item, dict) and item.get('@type') == 'Product':
-                                    json_ld_data = item
-                                    break
-                    logger.debug("Données JSON-LD trouvées")
-            except json.JSONDecodeError as e:
-                logger.debug(f"Erreur lors du parsing JSON-LD: {e}")
+        # Détecter si c'est la catégorie "Toile au mètre" (ignorer les variants même s'ils existent)
+        is_toile_metre = ('toile' in category_name.lower() and ('mètre' in category_name.lower() or 'metre' in category_name.lower()))
         
-        # Extraire le nom du produit depuis JSON-LD (priorité)
-        full_name = ""
-        if json_ld_data and 'name' in json_ld_data:
-            full_name = json_ld_data['name']
-            logger.debug(f"Titre extrait depuis JSON-LD: {full_name}")
+        # Extraction stricte des données produit (sans fallback)
+        product_code, product_code_found = extract_product_code_strict(soup, driver)
+        full_name, title_found = extract_title_strict(soup, driver)
+        description, description_found = extract_description_strict(soup, driver)
         
-        # Fallback: Extraire le nom du produit depuis le HTML
-        if not full_name:
-            # Chercher d'abord le h1
-            h1_elem = soup.find('h1')
-            h1_text = h1_elem.get_text(strip=True) if h1_elem else ''
-            
-            # Chercher le h2 (souvent la collection)
-            h2_elem = soup.find('h2')
-            h2_text = h2_elem.get_text(strip=True) if h2_elem else ''
-            
-            # Nettoyer h2 pour supprimer les textes indésirables
-            if h2_text:
-                # Supprimer les phrases indésirables
-                unwanted_phrases = [
-                    'Les clients qui ont acheté ce produit ont également acheté',
-                    'Les clients qui ont acheté',
-                    'ont également acheté',
-                    'Produits similaires',
-                    'Vous pourriez aussi aimer'
-                ]
-                for phrase in unwanted_phrases:
-                    if phrase.lower() in h2_text.lower():
-                        h2_text = ''
-                        break
-            
-            # Construire le titre complet : h1 + h2 si h2 existe et est valide
-            if h1_text:
-                if h2_text and len(h2_text) > 2:
-                    full_name = f"{h1_text} {h2_text}"
-                else:
-                    full_name = h1_text
-            else:
-                # Fallback sur title ou product_name
-                title_elem = soup.find('title')
-                full_name = title_elem.get_text(strip=True) if title_elem else product_name
+        # Déterminer le status initial
+        status = "success"
+        if not product_code_found or not title_found:
+            status = "error"
+        elif not description_found:
+            status = "error"
         
-        # Nettoyer le titre final pour supprimer les phrases indésirables
-        unwanted_phrases = [
-            'Les clients qui ont acheté ce produit ont également acheté',
-            'Les clients qui ont acheté',
-            'ont également acheté',
-            'Produits similaires',
-            'Vous pourriez aussi aimer'
-        ]
-        for phrase in unwanted_phrases:
-            if phrase.lower() in full_name.lower():
-                # Supprimer la phrase et tout ce qui suit
-                idx = full_name.lower().find(phrase.lower())
-                if idx > 0:
-                    full_name = full_name[:idx].strip()
-                break
+        # Extraire l'EAN13 (avec fallback sur product_code si non trouvé)
+        ean13, ean13_found = extract_ean13_strict(soup, driver, product_code)
         
+        # Utiliser product_code comme sku initial
+        sku = product_code
         name_without_code = full_name
         
-        # Extraire la description depuis JSON-LD (priorité)
-        description = ""
-        if json_ld_data and 'description' in json_ld_data:
-            description = json_ld_data['description']
-            # Convertir les entités HTML si nécessaire
-            description = description.replace('&nbsp;', ' ').replace('\u00a0', ' ')
-            # Convertir les retours à la ligne en <br> pour HTML
-            description = description.replace('\n', '<br>')
-            logger.info(f"Description extraite depuis JSON-LD ({len(description)} caractères)")
-        
-        # Fallback: Extraire la description HTML si pas trouvée dans JSON-LD
-        if not description:
-            description_html = ""
-            if driver:
-                try:
-                    # Faire défiler jusqu'aux onglets
-                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                    time.sleep(1)
-                    
-                    # Chercher les onglets (tabs)
-                    tabs = driver.find_elements(By.CSS_SELECTOR, 'a[data-toggle="tab"], button[data-toggle="tab"], .nav-tabs a, .tabs a')
-                    if not tabs:
-                        # Chercher par texte
-                        tabs = driver.find_elements(By.XPATH, "//a[contains(text(), 'Description')] | //button[contains(text(), 'Description')] | //a[contains(text(), 'Détails')] | //button[contains(text(), 'Détails')]")
-                    
-                    # Collecter le contenu de tous les onglets
-                    tab_contents = []
-                    for tab in tabs:
-                        try:
-                            # Cliquer sur l'onglet
-                            driver.execute_script("arguments[0].scrollIntoView(true);", tab)
-                            time.sleep(0.5)
-                            tab.click()
-                            time.sleep(1)
-                            
-                            # Récupérer le contenu de l'onglet actif
-                            active_pane = driver.find_elements(By.CSS_SELECTOR, '.tab-pane.active, .tab-content .active, [role="tabpanel"].active')
-                            if not active_pane:
-                                # Chercher le contenu après le clic
-                                html_after_click = driver.page_source
-                                soup_after = BeautifulSoup(html_after_click, 'html.parser')
-                                active_content = soup_after.find('div', class_=re.compile(r'tab-pane|tab-content', re.I))
-                                if active_content:
-                                    tab_contents.append(str(active_content))
-                            else:
-                                for pane in active_pane:
-                                    tab_contents.append(pane.get_attribute('innerHTML') or '')
-                        except Exception as e:
-                            logger.debug(f"Erreur lors du clic sur l'onglet: {e}")
-                            continue
-                    
-                    # Si pas d'onglets trouvés, chercher directement le contenu des sections
-                    if not tab_contents:
-                        html_scrolled = driver.page_source
-                        soup_scrolled = BeautifulSoup(html_scrolled, 'html.parser')
-                        
-                        # Chercher les sections de description
-                        desc_sections = soup_scrolled.find_all(['div', 'section'], class_=re.compile(r'description|product-description|product-details|tab-content', re.I))
-                        for section in desc_sections:
-                            if section.get_text(strip=True):
-                                tab_contents.append(str(section))
-                    
-                    # Combiner tout le contenu HTML
-                    if tab_contents:
-                        description_html = '\n'.join(tab_contents)
-                    else:
-                        # Fallback : chercher dans le HTML statique
-                        desc_elem = soup.find('div', class_=re.compile(r'description|content|product-description', re.I))
-                        if desc_elem:
-                            description_html = str(desc_elem)
-                        else:
-                            paragraphs = soup.find_all('p')
-                            description_html = ' '.join([str(p) for p in paragraphs[:5] if p.get_text(strip=True)])
-                except Exception as e:
-                    logger.debug(f"Erreur lors de l'extraction des onglets: {e}")
-                    # Fallback vers extraction simple
-                    desc_elem = soup.find('div', class_=re.compile(r'description|content|product-description', re.I))
-                    if desc_elem:
-                        description_html = str(desc_elem)
-                    else:
-                        paragraphs = soup.find_all('p')
-                        description_html = ' '.join([str(p) for p in paragraphs[:5] if p.get_text(strip=True)])
-            else:
-                # Pas de driver, extraction simple
-                desc_elem = soup.find('div', class_=re.compile(r'description|content|product-description', re.I))
-                if desc_elem:
-                    description_html = str(desc_elem)
-                else:
-                    paragraphs = soup.find_all('p')
-                    description_html = ' '.join([str(p) for p in paragraphs[:5] if p.get_text(strip=True)])
-            
-            description = description_html
-        
-        # Extraire le prix
+        # Prix initial (sera mis à jour pour les produits sans variant ou si pas de variants)
         price = ""
-        price_elem = soup.find('span', class_=re.compile(r'price|prix', re.I))
-        if price_elem:
-            price_text = price_elem.get_text(strip=True)
-            price_match = re.search(r'([\d,]+)', price_text.replace('€', '').replace(' ', ''))
-            if price_match:
-                price = price_match.group(1).replace(',', '.')
-        
-        # Extraire le SKU/Référence depuis JSON-LD (priorité)
-        sku = ""
-        if json_ld_data:
-            # Chercher sku dans le JSON-LD
-            if 'sku' in json_ld_data:
-                sku = str(json_ld_data['sku']).strip()
-                logger.debug(f"SKU trouvé via JSON-LD: {sku}")
-            # Chercher aussi dans offers si présent
-            elif 'offers' in json_ld_data:
-                offers = json_ld_data['offers']
-                if isinstance(offers, list) and len(offers) > 0:
-                    sku = str(offers[0].get('sku', '')).strip()
-                elif isinstance(offers, dict):
-                    sku = str(offers.get('sku', '')).strip()
-        
-        # Fallback: Chercher le SKU dans différentes structures HTML
-        if not sku:
-            sku_selectors = [
-                {'class': re.compile(r'reference|sku|product-reference', re.I)},
-                {'itemprop': 'sku'},
-                {'data-product-reference': True}
-            ]
-            
-            for selector in sku_selectors:
-                sku_elem = soup.find(['span', 'div', 'p'], selector)
-                if sku_elem:
-                    sku_text = sku_elem.get_text(strip=True)
-                    # Extraire le code référence
-                    sku_match = re.search(r'[:\s]*([A-Z0-9-]+)', sku_text, re.I)
-                    if sku_match:
-                        sku = sku_match.group(1).strip()
-                        break
-            
-            # Si pas de SKU trouvé, utiliser l'ID produit depuis l'URL ou data-product-id
-            if not sku:
-                product_id_elem = soup.find(attrs={'data-product-id': True})
-                if product_id_elem:
-                    sku = product_id_elem.get('data-product-id', '')
         
         # Extraire les images
         images = []
-        img_tags = soup.find_all('img')
-        for img in img_tags:
-            src = img.get('src') or img.get('data-src') or img.get('data-lazy-src')
-            if src:
-                # Filtrer les images de produits (exclure logos, icônes, etc.)
-                if any(pattern in src.lower() for pattern in ['product', 'produit', 'artiga.fr']):
-                    if 'logo' not in src.lower() and 'icon' not in src.lower():
-                        image_url = urljoin(BASE_URL, src)
-                        if image_url not in images:
-                            images.append(image_url)
         
-        # Si pas d'images trouvées, chercher dans les galeries
-        if not images:
-            gallery = soup.find('div', class_=re.compile(r'gallery|carousel|slider', re.I))
-            if gallery:
-                gallery_imgs = gallery.find_all('img')
-                for img in gallery_imgs:
-                    src = img.get('src') or img.get('data-src')
-                    if src:
-                        image_url = urljoin(BASE_URL, src)
-                        if image_url not in images:
-                            images.append(image_url)
+        # Chercher uniquement dans les divs avec class "product-img slick-slide" (sans "slick-cloned")
+        product_img_divs = soup.find_all('div', class_=lambda x: x and 'product-img' in x and 'slick-slide' in x and 'slick-cloned' not in x)
+        
+        for div in product_img_divs:
+            # Chercher l'image dans ce div
+            img = div.find('img')
+            if img:
+                # Extraire uniquement l'attribut src (pas srcset)
+                src = img.get('src')
+                if src:
+                    # Filtrer les images de produits (exclure logos, icônes, etc.)
+                    if any(pattern in src.lower() for pattern in ['product', 'produit', 'artiga.fr']):
+                        if 'logo' not in src.lower() and 'icon' not in src.lower():
+                            image_url = urljoin(BASE_URL, src)
+                            if image_url not in images:
+                                images.append(image_url)
         
         # Extraire les variants avec leurs prix spécifiques
         variants = []
@@ -1273,8 +1428,8 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                     except Exception as e:
                         logger.debug(f"Erreur avec button: {e}")
                 
-                # Si on a trouvé des variants, cliquer sur chacun pour obtenir le prix
-                if variant_options_list:
+                # Si on a trouvé des variants ET que ce n'est pas "Toile au mètre", cliquer sur chacun pour obtenir le prix
+                if variant_options_list and not is_toile_metre:
                     logger.info(f"Trouvé {len(variant_options_list)} option(s) de variant")
                     
                     # Obtenir le prix de base (avant de cliquer sur les variants)
@@ -1347,8 +1502,11 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                             # Extraire le prix après navigation/clic sur le variant
                             variant_price = ""
                             
-                            # Méthode 1: Essayer de récupérer le prix depuis les requêtes AJAX (plus fiable)
+                            # UNIQUEMENT AJAX pour les prix (pas BeautifulSoup qui retourne toujours le même prix)
                             try:
+                                # Attendre un peu pour que la requête AJAX soit envoyée
+                                time.sleep(2)
+                                
                                 # Récupérer les mises à jour de prix depuis les requêtes AJAX
                                 price_updates = get_ajax_price_updates(driver)
                                 
@@ -1363,170 +1521,50 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                                         variant_price = price_match.group(1).replace(',', '.')
                                         logger.info(f"Prix variant {variant_option.get('text', '')}: {variant_price} (trouvé via AJAX)")
                                 else:
-                                    logger.debug(f"Aucune requête AJAX capturée pour variant {variant_option.get('text', '')}, utilisation du DOM")
+                                    # Si pas de prix AJAX trouvé, ne pas utiliser de fallback DOM
+                                    # Le variant sera marqué en erreur dans scraper-collect.py
+                                    logger.warning(f"Aucune requête AJAX capturée pour variant {variant_option.get('text', '')} - le variant sera marqué en erreur")
                             except Exception as e:
                                 logger.debug(f"Erreur lors de la récupération du prix via AJAX: {e}")
                             
-                            # Méthode 2: Si pas trouvé via AJAX, utiliser le DOM
+                            # Si toujours pas de prix trouvé, ne pas utiliser de fallback
+                            # Le variant sera marqué en erreur dans scraper-collect.py
                             if not variant_price:
-                                # Attendre que le prix soit mis à jour (JavaScript peut prendre du temps)
-                                time.sleep(2)
-                                
-                                # Attendre explicitement que l'élément de prix soit présent
-                                try:
-                                    WebDriverWait(driver, 10).until(
-                                        EC.presence_of_element_located((By.CSS_SELECTOR, 'div.current-price span.current-price-display'))
-                                    )
-                                    time.sleep(2)
-                                except TimeoutException:
-                                    logger.debug("Timeout en attendant l'élément de prix")
-                                
-                                # Chercher le prix dans le DOM avec Selenium
-                                try:
-                                    current_price_div = driver.find_element(By.CSS_SELECTOR, 'div.current-price')
-                                    price_span = current_price_div.find_element(By.CSS_SELECTOR, 'span.current-price-display')
-                                    price_text = price_span.text.strip()
-                                    price_text_clean = price_text.replace('\xa0', ' ').replace('€', '').replace('&nbsp;', ' ').strip()
-                                    price_match = re.search(r'([\d,]+\.?\d*)', price_text_clean.replace(' ', '').replace(',', '.'))
-                                    if price_match:
-                                        price_value = float(price_match.group(1).replace(',', '.'))
-                                        if 1 <= price_value <= 10000:
-                                            variant_price = price_match.group(1).replace(',', '.')
-                                            logger.info(f"Prix variant {variant_option.get('text', '')}: {variant_price} (trouvé dans le DOM)")
-                                except Exception as e:
-                                    logger.debug(f"Erreur extraction prix depuis le DOM: {e}")
-                                
-                                # Si toujours pas trouvé, utiliser BeautifulSoup comme fallback
-                                if not variant_price:
-                                    html_after_variant = driver.page_source
-                                    soup_variant_price = BeautifulSoup(html_after_variant, 'html.parser')
-                                    current_price_div = soup_variant_price.find('div', class_='current-price')
-                                    if current_price_div:
-                                        price_span = current_price_div.find('span', class_=lambda x: x and 'current-price-display' in ' '.join(x) if isinstance(x, list) else 'current-price-display' in str(x))
-                                        if price_span:
-                                            price_text = price_span.get_text(strip=True)
-                                            price_text_clean = price_text.replace('\xa0', ' ').replace('€', '').replace('&nbsp;', ' ').strip()
-                                            price_match = re.search(r'([\d,]+\.?\d*)', price_text_clean.replace(' ', '').replace(',', '.'))
-                                            if price_match:
-                                                price_value = float(price_match.group(1).replace(',', '.'))
-                                                if 1 <= price_value <= 10000:
-                                                    variant_price = price_match.group(1).replace(',', '.')
-                                                    logger.info(f"Prix variant {variant_option.get('text', '')}: {variant_price} (trouvé avec BeautifulSoup)")
+                                logger.warning(f"Prix non trouvé pour variant {variant_option.get('text', '')} via AJAX - le variant sera marqué en erreur")
                             
-                            # Si toujours pas de prix trouvé, utiliser le prix de base
-                            if not variant_price:
-                                variant_price = base_price
-                                logger.debug(f"Prix non trouvé pour variant {variant_option.get('text', '')}, utilisation du prix de base: {base_price}")
+                            if variant_price:
+                                logger.info(f"Variant {variant_option.get('text', '')}: Prix={variant_price}")
+                            else:
+                                logger.warning(f"Variant {variant_option.get('text', '')}: Prix non trouvé")
                             
-                            logger.info(f"Variant {variant_option.get('text', '')}: Prix={variant_price}")
-                            
-                            # Récupérer le HTML mis à jour après le clic pour extraire SKU et autres infos
-                            html_after_variant = driver.page_source
-                            soup_variant = BeautifulSoup(html_after_variant, 'html.parser')
-                            
-                            # Récupérer le SKU/référence du variant depuis la page
+                            # Récupérer SKU et gencode via AJAX product_details (priorité)
                             variant_sku = sku
-                            # Chercher dans différentes structures
-                            ref_selectors = [
-                                {'class': re.compile(r'product-reference|reference', re.I)},
-                                {'id': re.compile(r'reference|ref', re.I)}
-                            ]
-                            
-                            for selector in ref_selectors:
-                                ref_elem = soup_variant.find(['div', 'span', 'p', 'td'], selector)
-                                if ref_elem:
-                                    # Chercher le span à l'intérieur qui contient la référence
-                                    ref_span = ref_elem.find('span')
-                                    if ref_span:
-                                        ref_text = ref_span.get_text(strip=True)
-                                    else:
-                                        ref_text = ref_elem.get_text(strip=True)
-                                    
-                                    # Chercher un code référence (format: ARGEN160_1492_160CM ou similaire)
-                                    # Exclure "Référence" du texte
-                                    ref_text_clean = re.sub(r'^référence\s*:?\s*', '', ref_text, flags=re.I).strip()
-                                    ref_match = re.search(r'([A-Z0-9][A-Z0-9_-]{5,})', ref_text_clean, re.I)
-                                    if ref_match:
-                                        variant_sku = ref_match.group(1).strip()
-                                        break
-                            
-                            # Si toujours pas trouvé, chercher dans le texte brut
-                            if variant_sku == sku:
-                                ref_text_elem = soup_variant.find(text=re.compile(r'référence', re.I))
-                                if ref_text_elem:
-                                    parent = ref_text_elem.find_parent()
-                                    if parent:
-                                        ref_text = parent.get_text(strip=True)
-                                        ref_text_clean = re.sub(r'^référence\s*:?\s*', '', ref_text, flags=re.I).strip()
-                                        ref_match = re.search(r'([A-Z0-9][A-Z0-9_-]{5,})', ref_text_clean, re.I)
-                                        if ref_match:
-                                            variant_sku = ref_match.group(1).strip()
-                            
-                            # Récupérer l'EAN13 si disponible
                             variant_gencode = ""
-                            # Chercher dans les sections de détails avec Selenium aussi
-                            try:
-                                # Chercher directement avec Selenium dans le HTML après le clic
-                                ean_elements = driver.find_elements(By.XPATH, "//dt[contains(text(), 'ean13') or contains(text(), 'ean')]/following-sibling::dd")
-                                if not ean_elements:
-                                    # Chercher par texte
-                                    ean_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'ean13') or contains(text(), 'ean 13')]")
+                            
+                            ajax_details = get_ajax_product_details(driver)
+                            if ajax_details.get('sku'):
+                                variant_sku = ajax_details['sku']
+                                logger.debug(f"SKU variant trouvé via AJAX: {variant_sku}")
+                            if ajax_details.get('gencode'):
+                                variant_gencode = ajax_details['gencode']
+                                logger.debug(f"Gencode variant trouvé via AJAX: {variant_gencode}")
+                            
+                            # Fallback DOM si AJAX n'a pas fourni les données
+                            if variant_sku == sku or not variant_gencode:
+                                html_after_variant = driver.page_source
+                                soup_variant = BeautifulSoup(html_after_variant, 'html.parser')
                                 
-                                for ean_elem in ean_elements:
-                                    ean_text = ean_elem.text.strip()
-                                    ean_match = re.search(r'(\d{13})', ean_text)
-                                    if ean_match:
-                                        variant_gencode = ean_match.group(1)
-                                        break
-                            except Exception as e:
-                                logger.debug(f"Erreur extraction EAN13 avec Selenium: {e}")
-                            
-                            # Si pas trouvé avec Selenium, chercher dans le HTML parsé
-                            if not variant_gencode:
-                                # Chercher dans les sections de détails
-                                ean_sections = soup_variant.find_all('section', class_=re.compile(r'product-features', re.I))
-                                for ean_section in ean_sections:
-                                    # Chercher "ean13" dans les dt
-                                    ean_dts = ean_section.find_all('dt')
-                                    for ean_dt in ean_dts:
-                                        if ean_dt.get_text() and re.search(r'ean13|ean', ean_dt.get_text(), re.I):
-                                            ean_dd = ean_dt.find_next_sibling('dd')
-                                            if ean_dd:
-                                                ean_text = ean_dd.get_text(strip=True)
-                                                ean_match = re.search(r'(\d{13})', ean_text)
-                                                if ean_match:
-                                                    variant_gencode = ean_match.group(1)
-                                                    break
-                                    if variant_gencode:
-                                        break
-                            
-                            # Si toujours pas trouvé, chercher dans tout le HTML
-                            if not variant_gencode:
-                                # Utiliser find avec string au lieu de text (déprécié)
-                                ean_text_elem = soup_variant.find(string=re.compile(r'ean13|ean\s*13', re.I))
-                                if ean_text_elem:
-                                    # Si c'est une NavigableString, trouver le parent
-                                    if hasattr(ean_text_elem, 'find_parent'):
-                                        parent = ean_text_elem.find_parent()
-                                    else:
-                                        # Sinon, chercher dans les éléments parents
-                                        for elem in soup_variant.find_all(['dd', 'td', 'span', 'div']):
-                                            if 'ean13' in elem.get_text().lower() or 'ean 13' in elem.get_text().lower():
-                                                ean_text = elem.get_text(strip=True)
-                                                ean_match = re.search(r'(\d{13})', ean_text)
-                                                if ean_match:
-                                                    variant_gencode = ean_match.group(1)
-                                                    break
-                                        if variant_gencode:
-                                            break
-                                    
-                                    if not variant_gencode and hasattr(ean_text_elem, 'find_parent'):
-                                        parent = ean_text_elem.find_parent()
-                                        if parent:
-                                            ean_text = parent.get_text(strip=True)
-                                            ean_match = re.search(r'(\d{13})', ean_text)
-                                            if ean_match:
-                                                variant_gencode = ean_match.group(1)
+                                # Fallback DOM pour SKU
+                                if variant_sku == sku:
+                                    variant_sku_extracted, _ = extract_product_code_strict(soup_variant, driver)
+                                    if variant_sku_extracted != "non trouvé":
+                                        variant_sku = variant_sku_extracted
+                                
+                                # Fallback DOM pour gencode
+                                if not variant_gencode:
+                                    variant_gencode_extracted, _ = extract_ean13_strict(soup_variant, driver, variant_sku)
+                                    if variant_gencode_extracted != "non trouvé":
+                                        variant_gencode = variant_gencode_extracted
                             
                             # Déterminer le type de variant (taille, couleur, etc.)
                             variant_text = variant_option.get('text', '').strip()
@@ -1551,7 +1589,7 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                                 'size': variant_value if variant_type == "Taille" else '',
                                 'full_code': variant_sku or sku or '',
                                 'pa': None,
-                                'pvc': variant_price or base_price or '',
+                                'pvc': variant_price or '',  # Pas de fallback sur base_price - si pas de prix, le variant sera en erreur
                                 'stock': None,
                                 'color': variant_value if variant_type == "Couleur" else '',
                                 'material': '',
@@ -1564,13 +1602,21 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                             continue
                 
                 # Si aucun variant trouvé ou traité, créer une variante par défaut
-                if not variants:
+                # Pour les produits sans variant ou "Toile au mètre", extraire le prix depuis le DOM
+                if not variants or is_toile_metre:
+                    # Extraire le prix depuis le DOM (priorité regular-price puis current-price)
+                    if driver:
+                        dom_price, price_source = extract_price_from_dom_no_variant(driver)
+                        if dom_price:
+                            price = dom_price
+                            logger.info(f"Prix extrait depuis DOM ({price_source}): {price}")
+                    
                     variant_data = {
-                        'code': sku if sku else slugify(full_name),
-                        'sku': sku or '',
-                        'gencode': '',
+                        'code': product_code if product_code != "non trouvé" else slugify(full_name),
+                        'sku': product_code if product_code != "non trouvé" else '',
+                        'gencode': ean13 if ean13 != "non trouvé" else '',
                         'size': '',
-                        'full_code': sku or '',
+                        'full_code': product_code if product_code != "non trouvé" else '',
                         'pa': None,
                         'pvc': price if price else '',
                         'stock': None,
@@ -1583,12 +1629,19 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
             except Exception as e:
                 logger.debug(f"Erreur lors de l'extraction des variants: {e}")
                 # Fallback : créer une variante par défaut
+                # Extraire le prix depuis le DOM si driver disponible
+                if driver:
+                    dom_price, price_source = extract_price_from_dom_no_variant(driver)
+                    if dom_price:
+                        price = dom_price
+                        logger.info(f"Prix extrait depuis DOM ({price_source}): {price}")
+                
                 variant_data = {
-                    'code': sku if sku else slugify(full_name),
-                    'sku': sku or '',
-                    'gencode': '',
+                    'code': product_code if product_code != "non trouvé" else slugify(full_name),
+                    'sku': product_code if product_code != "non trouvé" else '',
+                    'gencode': ean13 if ean13 != "non trouvé" else '',
                     'size': '',
-                    'full_code': sku or '',
+                    'full_code': product_code if product_code != "non trouvé" else '',
                     'pa': None,
                     'pvc': price if price else '',
                     'stock': None,
@@ -1599,49 +1652,70 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                 variants.append(variant_data)
         else:
             # Pas de driver, extraction simple depuis le HTML
-            select_elements = soup.find_all('select')
-            variant_options = {}
-            
-            for select in select_elements:
-                select_name = select.get('name', '').lower()
-                if 'color' in select_name or 'couleur' in select_name:
-                    variant_options['color'] = []
-                    for option in select.find_all('option'):
-                        if option.get('value'):
-                            variant_options['color'].append(option.get_text(strip=True))
-                elif 'size' in select_name or 'taille' in select_name:
-                    variant_options['size'] = []
-                    for option in select.find_all('option'):
-                        if option.get('value'):
-                            variant_options['size'].append(option.get_text(strip=True))
-            
-            if variant_options:
-                colors = variant_options.get('color', [''])
-                sizes = variant_options.get('size', [''])
+            # Si "Toile au mètre", traiter comme produit sans variant
+            if not is_toile_metre:
+                select_elements = soup.find_all('select')
+                variant_options = {}
                 
-                for color in colors:
-                    for size in sizes:
-                        variant_data = {
-                            'code': f"{sku}_{color}_{size}" if sku else f"{slugify(full_name)}_{color}_{size}",
-                            'sku': sku or '',
-                            'gencode': '',
-                            'size': size,
-                            'full_code': sku or '',
-                            'pa': None,
-                            'pvc': price if price else '',
-                            'stock': None,
-                            'color': color,
-                            'material': '',
-                            'url': product_url,
-                        }
-                        variants.append(variant_data)
-            else:
+                for select in select_elements:
+                    select_name = select.get('name', '').lower()
+                    if 'color' in select_name or 'couleur' in select_name:
+                        variant_options['color'] = []
+                        for option in select.find_all('option'):
+                            if option.get('value'):
+                                variant_options['color'].append(option.get_text(strip=True))
+                    elif 'size' in select_name or 'taille' in select_name:
+                        variant_options['size'] = []
+                        for option in select.find_all('option'):
+                            if option.get('value'):
+                                variant_options['size'].append(option.get_text(strip=True))
+                
+                if variant_options:
+                    colors = variant_options.get('color', [''])
+                    sizes = variant_options.get('size', [''])
+                    
+                    for color in colors:
+                        for size in sizes:
+                            variant_data = {
+                                'code': f"{product_code}_{color}_{size}" if product_code != "non trouvé" else f"{slugify(full_name)}_{color}_{size}",
+                                'sku': product_code if product_code != "non trouvé" else '',
+                                'gencode': ean13 if ean13 != "non trouvé" else '',
+                                'size': size,
+                                'full_code': product_code if product_code != "non trouvé" else '',
+                                'pa': None,
+                                'pvc': price if price else '',
+                                'stock': None,
+                                'color': color,
+                                'material': '',
+                                'url': product_url,
+                            }
+                            variants.append(variant_data)
+            
+            # Si pas de variants ou "Toile au mètre", créer une variante par défaut
+            if not variants or is_toile_metre:
+                # Essayer d'extraire le prix depuis le HTML (sans driver)
+                price_elem = soup.find('span', class_='regular-price')
+                if price_elem:
+                    price_text = price_elem.get_text(strip=True)
+                    price_match = re.search(r'([\d,]+\.?\d*)', price_text.replace('\xa0', ' ').replace('€', '').replace(' ', '').replace(',', '.'))
+                    if price_match:
+                        price = price_match.group(1).replace(',', '.')
+                else:
+                    current_price_div = soup.find('div', class_='current-price')
+                    if current_price_div:
+                        price_span = current_price_div.find('span', class_='current-price-display')
+                        if price_span:
+                            price_text = price_span.get_text(strip=True)
+                            price_match = re.search(r'([\d,]+\.?\d*)', price_text.replace('\xa0', ' ').replace('€', '').replace(' ', '').replace(',', '.'))
+                            if price_match:
+                                price = price_match.group(1).replace(',', '.')
+                
                 variant_data = {
-                    'code': sku if sku else slugify(full_name),
-                    'sku': sku or '',
-                    'gencode': '',
+                    'code': product_code if product_code != "non trouvé" else slugify(full_name),
+                    'sku': product_code if product_code != "non trouvé" else '',
+                    'gencode': ean13 if ean13 != "non trouvé" else '',
                     'size': '',
-                    'full_code': sku or '',
+                    'full_code': product_code if product_code != "non trouvé" else '',
                     'pa': None,
                     'pvc': price if price else '',
                     'stock': None,
@@ -1654,11 +1728,18 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
         logger.info(f"Produit {full_name}: {len(variants)} variant(s), {len(images)} image(s)")
         
         # Récupérer le SKU et gencode depuis le premier variant
-        product_sku = variants[0].get('sku', '') if variants else ''
-        product_gencode = ''
+        product_sku = variants[0].get('sku', '') if variants else product_code if product_code != "non trouvé" else ''
+        product_gencode = variants[0].get('gencode', '') if variants else ean13 if ean13 != "non trouvé" else ''
+        
+        # Si le titre extrait est "non trouvé", utiliser le product_name passé en paramètre
+        if not full_name or full_name == "non trouvé":
+            logger.warning(f"Titre extrait invalide ('{full_name}'), utilisation du product_name: {product_name}")
+            full_name = product_name
+            name_without_code = product_name
+            status = "error"  # Mettre le status en erreur si le titre n'est pas trouvé
         
         details = {
-            'code': sku if sku else slugify(full_name),
+            'code': product_code,
             'name': name_without_code,
             'full_name': full_name,
             'description': description,
@@ -1666,7 +1747,8 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
             'images': images,
             'url': product_url,
             'sku': product_sku,
-            'gencode': product_gencode
+            'gencode': product_gencode,
+            'status': status
         }
         
         return (details, driver, session)
@@ -1684,11 +1766,11 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
     logger.info("Génération du CSV Shopify...")
     
     # Obtenir la configuration CSV
-    csv_config = get_csv_config()
+    csv_config = get_csv_config()  # Retourne un objet CSVConfig
     supplier = 'artiga'
-    configured_columns = csv_config.get_columns(supplier)
-    handle_source = csv_config.get_handle_source(supplier)
-    vendor_name = csv_config.get_vendor(supplier)
+    configured_columns = csv_config.get_columns(supplier)  # Liste des colonnes
+    handle_source = csv_config.get_handle_source(supplier)  # Source du handle
+    vendor_name = csv_config.get_vendor(supplier)  # Nom du vendor
     
     rows = []
     
@@ -1715,134 +1797,104 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
         product_sku = product_details.get('sku', product_code)
         product_gencode = product_details.get('gencode', '')
         
-        # Créer une ligne par variante
-        for variant_idx, variant in enumerate(variants):
-            variant_sku = variant.get('sku') or variant.get('full_code') or product_sku
-            variant_gencode = variant.get('gencode') or product_gencode
-            
-            # Générer le Handle selon la source configurée
-            if handle_source == 'barcode':
-                handle = variant_gencode or product_gencode or ''
-            elif handle_source == 'sku':
-                handle = variant_sku or product_sku or ''
-            elif handle_source == 'title':
-                handle = slugify(full_name)
-            else:
-                handle = variant_gencode or product_gencode or slugify(full_name)
-            
-            # Créer un dictionnaire avec tous les champs Shopify par défaut
-            base_row = {
-                'Handle': handle or '',
-                'Title': full_name or '',
-                'Body (HTML)': description or '',
-                'Vendor': vendor_name,
-                'Product Category': '',
-                'Type': category,
-                'Tags': category,
-                'Published': 'TRUE',
-                'Option1 Name': 'Taille' if variant.get('size') else '',
-                'Option1 Value': variant.get('size') or '',
-                'Option2 Name': '',
-                'Option2 Value': '',
-                'Option3 Name': '',
-                'Option3 Value': '',
-                'Variant SKU': variant_sku or '',
-                'Variant Grams': '',
-                'Variant Inventory Tracker': 'shopify',
-                'Variant Inventory Qty': variant.get('stock') or 0,
-                'Variant Inventory Policy': 'deny',
-                'Variant Fulfillment Service': 'manual',
-                'Variant Price': variant.get('pvc') or '',
-                'Variant Compare At Price': variant.get('pa') or '',
-                'Variant Requires Shipping': 'TRUE',
-                'Variant Taxable': 'TRUE',
-                'Variant Barcode': variant_gencode or '',
-                'Image Src': '',
-                'Image Position': '',
-                'Image Alt Text': '',
-                'Gift Card': 'FALSE',
-                'SEO Title': full_name or '',
-                'SEO Description': (description[:160] if description else '') or '',
-                'Google Shopping / Google Product Category': '',
-                'Google Shopping / Gender': '',
-                'Google Shopping / Age Group': '',
-                'Google Shopping / MPN': variant.get('code') or '',
-                'Google Shopping / Condition': 'new',
-                'Google Shopping / Custom Product': 'FALSE',
-                'Variant Image': image_urls[0] if image_urls and variant_idx == 0 else '',
-                'Variant Weight Unit': 'kg',
-                'Variant Tax Code': '',
-                'Cost per item': variant.get('pa') or '',
-                'Included / United States': '',
-                'Price / United States': '',
-                'Compare At Price / United States': '',
-                'Included / International': '',
-                'Price / International': '',
-                'Compare At Price / International': '',
-                'Status': 'active',
-            }
-            
-            # Si pas d'images, créer une seule ligne sans images
-            if not image_urls:
-                rows.append(base_row.copy())
-            else:
-                # Créer une ligne par image
-                for img_idx, image_url in enumerate(image_urls, start=1):
-                    row = base_row.copy()
-                    
-                    # Pour la première image, garder toutes les infos
-                    # Pour les images suivantes, vider les champs variant sauf Handle
-                    if img_idx > 1:
-                        row['Title'] = ''
-                        row['Body (HTML)'] = ''
-                        row['Vendor'] = ''
-                        row['Product Category'] = ''
-                        row['Type'] = ''
-                        row['Tags'] = ''
-                        row['Published'] = ''
-                        row['Option1 Name'] = ''
-                        row['Option1 Value'] = ''
-                        row['Option2 Name'] = ''
-                        row['Option2 Value'] = ''
-                        row['Option3 Name'] = ''
-                        row['Option3 Value'] = ''
-                        row['Variant SKU'] = ''
-                        row['Variant Grams'] = ''
-                        row['Variant Inventory Tracker'] = ''
-                        row['Variant Inventory Qty'] = ''
-                        row['Variant Inventory Policy'] = ''
-                        row['Variant Fulfillment Service'] = ''
-                        row['Variant Price'] = ''
-                        row['Variant Compare At Price'] = ''
-                        row['Variant Requires Shipping'] = ''
-                        row['Variant Taxable'] = ''
-                        row['Variant Barcode'] = ''
-                        row['Variant Image'] = ''
-                        row['Variant Weight Unit'] = ''
-                        row['Variant Tax Code'] = ''
-                        row['Cost per item'] = ''
-                        row['SEO Title'] = ''
-                        row['SEO Description'] = ''
-                        row['Google Shopping / Google Product Category'] = ''
-                        row['Google Shopping / Gender'] = ''
-                        row['Google Shopping / Age Group'] = ''
-                        row['Google Shopping / MPN'] = ''
-                        row['Google Shopping / Condition'] = ''
-                        row['Google Shopping / Custom Product'] = ''
-                        row['Included / United States'] = ''
-                        row['Price / United States'] = ''
-                        row['Compare At Price / United States'] = ''
-                        row['Included / International'] = ''
-                        row['Price / International'] = ''
-                        row['Compare At Price / International'] = ''
-                        row['Status'] = ''
-                    
-                    # Ajouter les informations de l'image
-                    row['Image Src'] = image_url
-                    row['Image Position'] = img_idx
-                    row['Image Alt Text'] = full_name or ''
-                    
-                    rows.append(row)
+        # Générer le Handle UNE SEULE FOIS par produit (doit être le même pour tous les variants)
+        # Le Handle doit être basé sur les données du produit, pas sur les variants individuels
+        if handle_source == 'barcode':
+            handle = product_gencode or ''
+        elif handle_source == 'sku':
+            handle = product_sku or product_code or ''
+        elif handle_source == 'title':
+            handle = slugify(full_name)
+        else:
+            handle = product_gencode or product_sku or product_code or slugify(full_name)
+        
+            # Créer une ligne par variante
+            for variant_idx, variant in enumerate(variants):
+                variant_sku = variant.get('sku') or variant.get('full_code') or product_sku
+                variant_gencode = variant.get('gencode') or product_gencode
+                
+                # Créer une ligne vide avec toutes les colonnes configurées
+                base_row = {col: '' for col in configured_columns}
+                
+                # Remplir les champs de base (première ligne du produit/variant)
+                base_row['Handle'] = handle or ''
+                base_row['Title'] = full_name or ''
+                base_row['Body (HTML)'] = description or ''
+                base_row['Vendor'] = vendor_name
+                base_row['Product Category'] = ''
+                base_row['Type'] = category
+                base_row['Tags'] = category
+                base_row['Published'] = 'TRUE'
+                base_row['Option1 Name'] = 'Taille' if variant.get('size') else ''
+                base_row['Option1 Value'] = variant.get('size') or ''
+                base_row['Option2 Name'] = ''
+                base_row['Option2 Value'] = ''
+                base_row['Option3 Name'] = ''
+                base_row['Option3 Value'] = ''
+                base_row['Variant SKU'] = variant_sku or ''
+                base_row['Variant Grams'] = ''
+                base_row['Variant Inventory Tracker'] = 'shopify'
+                base_row['Variant Inventory Qty'] = str(variant.get('stock') or 0)
+                base_row['Variant Inventory Policy'] = 'deny'
+                base_row['Variant Fulfillment Service'] = 'manual'
+                base_row['Variant Price'] = variant.get('pvc') or ''  # LE PRIX VA ICI
+                base_row['Variant Compare At Price'] = variant.get('pa') or ''
+                base_row['Variant Requires Shipping'] = 'TRUE'
+                base_row['Variant Taxable'] = 'TRUE'
+                base_row['Variant Barcode'] = variant_gencode or ''
+                base_row['Gift Card'] = 'FALSE'
+                base_row['SEO Title'] = full_name or ''
+                base_row['SEO Description'] = (description[:160] if description else '') or ''
+                base_row['Google Shopping / Google Product Category'] = ''
+                base_row['Google Shopping / Gender'] = ''
+                base_row['Google Shopping / Age Group'] = ''
+                base_row['Google Shopping / MPN'] = variant.get('code') or ''
+                base_row['Google Shopping / Condition'] = 'new'
+                base_row['Google Shopping / Custom Product'] = 'FALSE'
+                base_row['Variant Image'] = image_urls[0] if image_urls and variant_idx == 0 else ''
+                base_row['Variant Weight Unit'] = 'kg'
+                base_row['Variant Tax Code'] = ''
+                base_row['Cost per item'] = variant.get('pa') or ''
+                base_row['Included / United States'] = ''
+                base_row['Price / United States'] = ''
+                base_row['Compare At Price / United States'] = ''
+                base_row['Included / International'] = ''
+                base_row['Price / International'] = ''
+                base_row['Compare At Price / International'] = ''
+                base_row['Status'] = 'active'
+                base_row['location'] = 'La Gustothèque'  # Emplacement Shopify
+                base_row['On hand (new)'] = str(variant.get('stock') or 0)  # Stock (quantité disponible)
+                base_row['On hand (current)'] = ''  # Champ vide
+                
+                # Pour le premier variant seulement, ajouter les images
+                if variant_idx == 0:
+                    # Si pas d'images, créer une seule ligne sans images
+                    if not image_urls:
+                        rows.append(base_row.copy())
+                    else:
+                        # Créer une ligne par image pour le premier variant
+                        for img_idx, image_url in enumerate(image_urls, start=1):
+                            row = base_row.copy()
+                            
+                            if img_idx == 1:
+                                # Première image : garder toutes les infos produit et variant (déjà dans base_row)
+                                pass
+                            else:
+                                # Images suivantes : Vider TOUS les champs sauf Handle, Image Src, Image Position, Image Alt Text
+                                # Shopify associe les images au produit via le Handle uniquement
+                                for col in configured_columns:
+                                    if col not in ['Handle', 'Image Src', 'Image Position', 'Image Alt Text']:
+                                        row[col] = ''
+                            
+                            # Ajouter les informations de l'image
+                            row['Image Src'] = image_url
+                            row['Image Position'] = img_idx
+                            row['Image Alt Text'] = full_name or ''
+                            
+                            rows.append(row)
+                else:
+                    # Pour les autres variants, créer une seule ligne sans images (les images sont déjà définies)
+                    rows.append(base_row.copy())
     
     # Créer le DataFrame
     df = pd.DataFrame(rows)
@@ -2124,8 +2176,8 @@ Exemples d'utilisation:
             for idx, product in enumerate(products_to_process, 1):
                 logger.info(f"Traitement du produit {idx}/{len(products_to_process)}: {product['name']}")
                 
-                # Extraire les détails
-                details, driver, session = get_product_details(driver, session, product['url'], product['name'], headless=not args.no_headless)
+                # Extraire les détails (passer le nom de catégorie pour détecter "Toile au mètre")
+                details, driver, session = get_product_details(driver, session, product['url'], product['name'], headless=not args.no_headless, category_name=category_name)
                 
                 if details:
                     all_products_data.append({

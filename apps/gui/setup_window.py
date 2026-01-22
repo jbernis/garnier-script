@@ -69,7 +69,7 @@ class SetupWindow(ctk.CTkToplevel):
             text="Vérifier",
             command=self.run_checks,
             width=150,
-            height=40
+            height=30
         )
         self.check_button.pack(side="left", padx=10)
         
@@ -79,7 +79,7 @@ class SetupWindow(ctk.CTkToplevel):
             text="Installer les packages",
             command=self.install_packages,
             width=200,
-            height=40,
+            height=30,
             state="disabled"
         )
         self.install_button.pack(side="left", padx=10)
@@ -90,7 +90,7 @@ class SetupWindow(ctk.CTkToplevel):
             text="Fermer",
             command=self.destroy,
             width=150,
-            height=40,
+            height=30,
             fg_color="gray",
             hover_color="darkgray"
         )

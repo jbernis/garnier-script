@@ -53,7 +53,6 @@ class ConfigWindow(ctk.CTkToplevel):
         self.create_garnier_section(main_frame)
         self.create_artiga_section(main_frame)
         self.create_cristel_section(main_frame)
-        self.create_ai_providers_section(main_frame)
         self.create_app_settings_section(main_frame)
         
         # Frame pour les boutons
@@ -66,7 +65,7 @@ class ConfigWindow(ctk.CTkToplevel):
             text="Sauvegarder",
             command=self.save_config,
             width=150,
-            height=40
+            height=30
         )
         save_button.pack(side="left", padx=10)
         
@@ -76,7 +75,7 @@ class ConfigWindow(ctk.CTkToplevel):
             text="Annuler",
             command=self.destroy,
             width=150,
-            height=40,
+            height=30,
             fg_color="gray",
             hover_color="darkgray"
         )
@@ -196,34 +195,6 @@ class ConfigWindow(ctk.CTkToplevel):
         # Base URL
         self.create_field(form_frame, 'cristel', 'CRISTEL_BASE_URL', 'URL de base:', 'https://www.cristel.com')
     
-    def create_ai_providers_section(self, parent):
-        """Crée la section de configuration pour les fournisseurs IA."""
-        section_frame = ctk.CTkFrame(parent)
-        section_frame.pack(fill="x", pady=(0, 20))
-        
-        # Titre de la section
-        title = ctk.CTkLabel(
-            section_frame,
-            text="Fournisseurs IA",
-            font=ctk.CTkFont(size=18, weight="bold")
-        )
-        title.pack(anchor="w", padx=20, pady=(20, 15))
-        
-        # Formulaire
-        form_frame = ctk.CTkFrame(section_frame)
-        form_frame.pack(fill="x", padx=20, pady=(0, 20))
-        
-        self.entries['ai'] = {}
-        
-        # OpenAI API Key
-        self.create_field(form_frame, 'ai', 'OPENAI_API_KEY', 'OpenAI API Key:', '', is_password=True)
-        
-        # Anthropic API Key (Claude)
-        self.create_field(form_frame, 'ai', 'ANTHROPIC_API_KEY', 'Anthropic API Key (Claude):', '', is_password=True)
-        
-        # Google API Key (Gemini)
-        self.create_field(form_frame, 'ai', 'GOOGLE_API_KEY', 'Google API Key (Gemini):', '', is_password=True)
-    
     def create_app_settings_section(self, parent):
         """Crée la section des paramètres de l'application."""
         section_frame = ctk.CTkFrame(parent)
@@ -315,20 +286,6 @@ class ConfigWindow(ctk.CTkToplevel):
         cristel_vars = self.env_manager.get_by_provider("cristel")
         if 'CRISTEL_BASE_URL' in self.entries.get('cristel', {}):
             self.entries['cristel']['CRISTEL_BASE_URL'].insert(0, cristel_vars.get('CRISTEL_BASE_URL', ''))
-        
-        # Charger les valeurs pour les fournisseurs IA
-        if 'OPENAI_API_KEY' in self.entries.get('ai', {}):
-            openai_key = self.env_manager.get('OPENAI_API_KEY', '')
-            if openai_key:
-                self.entries['ai']['OPENAI_API_KEY'].insert(0, openai_key)
-        if 'ANTHROPIC_API_KEY' in self.entries.get('ai', {}):
-            anthropic_key = self.env_manager.get('ANTHROPIC_API_KEY', '')
-            if anthropic_key:
-                self.entries['ai']['ANTHROPIC_API_KEY'].insert(0, anthropic_key)
-        if 'GOOGLE_API_KEY' in self.entries.get('ai', {}):
-            google_key = self.env_manager.get('GOOGLE_API_KEY', '')
-            if google_key:
-                self.entries['ai']['GOOGLE_API_KEY'].insert(0, google_key)
     
     def load_app_config(self):
         """Charge la configuration de l'application."""
@@ -347,12 +304,7 @@ class ConfigWindow(ctk.CTkToplevel):
                         provider_vars[key] = value
                 
                 if provider_vars:
-                    if provider == 'ai':
-                        # Pour les clés API IA, les sauvegarder directement
-                        for key, value in provider_vars.items():
-                            self.env_manager.set(key, value)
-                    else:
-                        self.env_manager.set_provider_vars(provider, provider_vars)
+                    self.env_manager.set_provider_vars(provider, provider_vars)
             
             # Sauvegarder la configuration .env
             env_saved = self.env_manager.save()

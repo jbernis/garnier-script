@@ -47,10 +47,12 @@ class ReprocessWindow(ctk.CTkToplevel):
         self.attributes('-topmost', True)
         self.after(100, lambda: self.attributes('-topmost', False))
         
-        # Variables pour les checkboxes (par défaut toutes cochées)
-        self.reprocess_error_products = ctk.BooleanVar(value=True)
-        self.reprocess_error_variants = ctk.BooleanVar(value=True)
-        self.reprocess_pending_variants = ctk.BooleanVar(value=True)
+        # Variables pour les checkboxes
+        # Par défaut, SEULE l'action principale est cochée
+        self.reprocess_error_gammes = ctk.BooleanVar(value=False)  # Décoché par défaut
+        self.reprocess_error_products = ctk.BooleanVar(value=False)  # Décoché par défaut
+        self.reprocess_pending_variants = ctk.BooleanVar(value=True)  # ✅ ACTION PRINCIPALE - Coché par défaut
+        self.reprocess_error_variants = ctk.BooleanVar(value=False)  # Décoché par défaut
         
         self._create_widgets()
         self._load_categories()
@@ -128,30 +130,70 @@ class ReprocessWindow(ctk.CTkToplevel):
         options_frame = ctk.CTkFrame(section3)
         options_frame.pack(fill="x", padx=10, pady=(0, 10))
         
+        # Checkbox pour les gammes (uniquement pour Garnier)
+        if self.scraper.name.lower() == 'garnier':
+            # Label explicatif
+            info_label = ctk.CTkLabel(
+                options_frame,
+                text="⚠️ Les gammes pending/processing ont déjà leurs produits collectés.\n   → Utilisez plutôt 'Retraiter les variants pending' pour les traiter.",
+                font=ctk.CTkFont(size=11),
+                text_color=("orange", "orange"),
+                justify="left"
+            )
+            info_label.pack(anchor="w", padx=10, pady=(5, 10))
+            
+            self.error_gammes_check = ctk.CTkCheckBox(
+                options_frame,
+                text="0️⃣ Re-collecter les gammes en ERREUR (0) - Force une nouvelle collecte",
+                variable=self.reprocess_error_gammes
+            )
+            self.error_gammes_check.pack(anchor="w", padx=10, pady=5)
+            
+            # Séparateur visuel
+            separator = ctk.CTkLabel(
+                options_frame,
+                text="─" * 60,
+                font=ctk.CTkFont(size=10),
+                text_color=("gray50", "gray50")
+            )
+            separator.pack(anchor="w", padx=10, pady=(10, 5))
+        
         self.error_products_check = ctk.CTkCheckBox(
             options_frame,
-            text="1️⃣ Re-collecter les produits en erreur (0)",
+            text="1️⃣ Re-collecter les produits en ERREUR (0) - Force une nouvelle collecte",
             variable=self.reprocess_error_products
         )
         self.error_products_check.pack(anchor="w", padx=10, pady=5)
         
+        # Label pour les variants (principal)
+        variants_label = ctk.CTkLabel(
+            options_frame,
+            text="💡 RECOMMANDÉ : Traiter les détails des variants",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=("green", "lightgreen"),
+            justify="left"
+        )
+        variants_label.pack(anchor="w", padx=10, pady=(15, 5))
+        
+        self.pending_variants_check = ctk.CTkCheckBox(
+            options_frame,
+            text="2️⃣ Traiter les variants PENDING (0) - Extrait nom, description, prix, images",
+            variable=self.reprocess_pending_variants,
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.pending_variants_check.pack(anchor="w", padx=10, pady=5)
+        
         self.error_variants_check = ctk.CTkCheckBox(
             options_frame,
-            text="2️⃣ Retraiter les variants en erreur (0)",
+            text="3️⃣ Re-traiter les variants en ERREUR (0) - Nouvelle tentative",
             variable=self.reprocess_error_variants
         )
         self.error_variants_check.pack(anchor="w", padx=10, pady=5)
         
-        self.pending_variants_check = ctk.CTkCheckBox(
-            options_frame,
-            text="3️⃣ Retraiter les variants pending (0)",
-            variable=self.reprocess_pending_variants
-        )
-        self.pending_variants_check.pack(anchor="w", padx=10, pady=5)
-        
+        order_text = "Gammes → Produits → Variants erreur → Variants pending" if self.scraper.name.lower() == 'garnier' else "Produits → Variants erreur → Variants pending"
         info_label = ctk.CTkLabel(
             options_frame,
-            text="💡 Ordre d'exécution : Produits → Variants erreur → Variants pending",
+            text=f"💡 Ordre d'exécution : {order_text}",
             font=ctk.CTkFont(size=11),
             text_color=("gray50", "gray60")
         )
@@ -166,7 +208,7 @@ class ReprocessWindow(ctk.CTkToplevel):
             text="🔄 Lancer le retraitement",
             command=self._start_reprocessing,
             state="disabled",
-            height=40
+            height=30
         )
         self.start_btn.pack(side="left", padx=5, expand=True, fill="x")
         
@@ -176,7 +218,7 @@ class ReprocessWindow(ctk.CTkToplevel):
             command=self.destroy,
             fg_color="gray",
             hover_color="darkgray",
-            height=40
+            height=30
         )
         cancel_btn.pack(side="left", padx=5)
     
@@ -223,6 +265,12 @@ class ReprocessWindow(ctk.CTkToplevel):
             db_path = get_supplier_db_path(self.scraper.name.lower())
             db = self.db_class(db_path)
             self.stats = db.get_category_stats(self.current_category)
+            
+            # Récupérer les stats des gammes si Garnier
+            gammes_stats = None
+            if self.scraper.name.lower() == 'garnier' and hasattr(db, 'get_category_gamme_stats'):
+                gammes_stats = db.get_category_gamme_stats(self.current_category)
+            
             db.close()
             
             # Formater l'affichage
@@ -233,7 +281,24 @@ class ReprocessWindow(ctk.CTkToplevel):
             prod_pct = (products['completed'] / products['total'] * 100) if products['total'] > 0 else 0
             var_pct = (variants['completed'] / variants['total'] * 100) if variants['total'] > 0 else 0
             
-            text = f"""
+            text = ""
+            
+            # Ajouter les stats des gammes si disponibles (Garnier uniquement)
+            if gammes_stats:
+                gamme_pct = (gammes_stats['completed'] / gammes_stats['total'] * 100) if gammes_stats['total'] > 0 else 0
+                processing_count = gammes_stats.get('processing', 0)  # Peut ne pas exister dans anciennes bases
+                text += f"""
+🎯 GAMMES ({gamme_pct:.1f}% complété)
+   • Completed:  {gammes_stats['completed']:>4}  ✅
+   • Processing: {processing_count:>4}  🔄
+   • Pending:    {gammes_stats['pending']:>4}  ⏳
+   • Error:      {gammes_stats['error']:>4}  ❌
+   {'─' * 30}
+   Total:        {gammes_stats['total']:>4}
+
+"""
+            
+            text += f"""
 📦 PRODUITS ({prod_pct:.1f}% complété)
    • Completed: {products['completed']:>4}  ✅
    • Pending:   {products['pending']:>4}  ⏳
@@ -249,32 +314,74 @@ class ReprocessWindow(ctk.CTkToplevel):
    Total:       {variants['total']:>4}
 """
             
-            self.stats_label.configure(
-                text=text,
-                font=ctk.CTkFont(size=13, family="Monaco")
-            )
+            # Configurer le label des stats (protégé)
+            try:
+                if hasattr(self, 'stats_label'):
+                    self.stats_label.configure(
+                        text=text,
+                        font=ctk.CTkFont(size=13, family="Monaco")
+                    )
+            except Exception:
+                pass
             
             # Activer le bouton de retraitement seulement s'il y a du travail
             has_work = (variants['error'] + variants['pending'] + products['error']) > 0
-            self.start_btn.configure(state="normal" if has_work else "disabled")
+            if gammes_stats:
+                has_work = has_work or gammes_stats['error'] > 0 or gammes_stats['pending'] > 0 or gammes_stats.get('processing', 0) > 0
             
-            # Mettre à jour le texte des checkboxes (dans l'ordre d'exécution)
-            self.error_products_check.configure(
-                text=f"1️⃣ Re-collecter les produits en erreur ({products['error']})",
-                state="normal" if products['error'] > 0 else "disabled"
-            )
-            self.error_variants_check.configure(
-                text=f"2️⃣ Retraiter les variants en erreur ({variants['error']})",
-                state="normal" if variants['error'] > 0 else "disabled"
-            )
-            self.pending_variants_check.configure(
-                text=f"3️⃣ Retraiter les variants pending ({variants['pending']})",
-                state="normal" if variants['pending'] > 0 else "disabled"
-            )
+            try:
+                if hasattr(self, 'start_btn'):
+                    self.start_btn.configure(state="normal" if has_work else "disabled")
+            except Exception:
+                pass
+            
+            # Mettre à jour le texte des checkboxes (dans l'ordre d'exécution) - Protégé
+            try:
+                if self.scraper.name.lower() == 'garnier' and gammes_stats:
+                    if hasattr(self, 'error_gammes_check'):
+                        self.error_gammes_check.configure(
+                            text=f"0️⃣ Re-collecter les gammes en ERREUR ({gammes_stats['error']}) - Force une nouvelle collecte",
+                            state="normal" if gammes_stats['error'] > 0 else "disabled"
+                        )
+            except Exception:
+                pass
+            
+            try:
+                if hasattr(self, 'error_products_check'):
+                    self.error_products_check.configure(
+                        text=f"1️⃣ Re-collecter les produits en ERREUR ({products['error']}) - Force une nouvelle collecte",
+                        state="normal" if products['error'] > 0 else "disabled"
+                    )
+            except Exception:
+                pass
+            
+            try:
+                if hasattr(self, 'pending_variants_check'):
+                    self.pending_variants_check.configure(
+                        text=f"2️⃣ Traiter les variants PENDING ({variants['pending']}) - Extrait nom, description, prix, images",
+                        state="normal" if variants['pending'] > 0 else "disabled",
+                        font=ctk.CTkFont(size=13, weight="bold") if variants['pending'] > 0 else ctk.CTkFont(size=13)
+                    )
+            except Exception:
+                pass
+            
+            try:
+                if hasattr(self, 'error_variants_check'):
+                    self.error_variants_check.configure(
+                        text=f"3️⃣ Re-traiter les variants en ERREUR ({variants['error']}) - Nouvelle tentative",
+                        state="normal" if variants['error'] > 0 else "disabled"
+                    )
+            except Exception:
+                pass
             
         except Exception as e:
             logger.error(f"Erreur lors du chargement des stats: {e}")
-            self.stats_label.configure(text=f"Erreur: {e}")
+            # Ne PAS essayer de configurer le label ici, il peut être détruit
+            try:
+                if hasattr(self, 'stats_label'):
+                    self.stats_label.configure(text=f"Erreur: {e}")
+            except Exception:
+                pass  # Ignorer silencieusement si le widget est détruit
     
     def _start_reprocessing(self):
         """Lance le retraitement selon les options sélectionnées."""
@@ -282,20 +389,35 @@ class ReprocessWindow(ctk.CTkToplevel):
             return
         
         # Déterminer quelles actions sont nécessaires
-        # IMPORTANT : Les produits doivent être retraités EN PREMIER
+        # IMPORTANT : Ordre d'exécution : Gammes → Produits → Variants erreur → Variants pending
         actions = []
+        
+        # 0. Re-collecter les gammes en erreur (si sélectionné et Garnier)
+        if (self.scraper.name.lower() == 'garnier' and 
+            hasattr(self, 'reprocess_error_gammes') and 
+            self.reprocess_error_gammes.get()):
+            # Récupérer les stats des gammes
+            db_path = get_supplier_db_path(self.scraper.name.lower())
+            db = self.db_class(db_path)
+            if hasattr(db, 'get_category_gamme_stats'):
+                gammes_stats = db.get_category_gamme_stats(self.current_category)
+                db.close()
+                if gammes_stats and gammes_stats['error'] > 0:
+                    actions.append(('recollect_error_gammes', 'Re-collecte des gammes en erreur'))
+            else:
+                db.close()
         
         # 1. Re-collecter les produits en erreur (si sélectionné)
         if self.reprocess_error_products.get() and self.stats['products']['error'] > 0:
             actions.append(('recollect_error_products', 'Re-collecte des produits en erreur'))
         
-        # 2. Retraiter les variants en erreur (si sélectionné)
-        if self.reprocess_error_variants.get() and self.stats['variants']['error'] > 0:
-            actions.append(('process_error_variants', 'Retraitement des variants en erreur'))
-        
-        # 3. Retraiter les variants pending (si sélectionné)
+        # 2. Traiter les variants pending (si sélectionné) - ACTION PRINCIPALE
         if self.reprocess_pending_variants.get() and self.stats['variants']['pending'] > 0:
-            actions.append(('process_pending_variants', 'Retraitement des variants pending'))
+            actions.append(('process_pending_variants', 'Traitement des variants pending'))
+        
+        # 3. Re-traiter les variants en erreur (si sélectionné)
+        if self.reprocess_error_variants.get() and self.stats['variants']['error'] > 0:
+            actions.append(('process_error_variants', 'Re-traitement des variants en erreur'))
         
         if not actions:
             logger.warning("Aucune action sélectionnée pour le retraitement")
@@ -315,7 +437,9 @@ class ReprocessWindow(ctk.CTkToplevel):
                     progress_window.add_log(f"▶ {action_label}...")
                     progress_window.add_log(f"{'='*50}\n")
                     
-                    if action_type == 'process_error_variants':
+                    if action_type == 'recollect_error_gammes':
+                        self._recollect_gammes(progress_window, status='error')
+                    elif action_type == 'process_error_variants':
                         self._process_variants(progress_window, 'error')
                     elif action_type == 'process_pending_variants':
                         self._process_variants(progress_window, 'pending')
@@ -352,6 +476,63 @@ class ReprocessWindow(ctk.CTkToplevel):
             '--category', self.current_category,
             '--status', status
         ]
+        
+        progress_window.add_log(f"Répertoire: {project_dir}")
+        progress_window.add_log(f"Commande: {' '.join(cmd)}\n")
+        
+        # Exécuter le processus avec affichage en temps réel
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+            cwd=project_dir
+        )
+        
+        # Lire et afficher les logs en temps réel
+        for line in iter(process.stdout.readline, ''):
+            if line:
+                progress_window.add_log(line.rstrip())
+        
+        process.wait()
+        
+        if process.returncode != 0:
+            progress_window.add_log(f"\n❌ Le script a échoué avec le code {process.returncode}")
+            raise Exception(f"Le script a retourné le code d'erreur {process.returncode}")
+    
+    def _recollect_gammes(self, progress_window, status='error'):
+        """Lance le script de re-collecte des gammes selon leur statut.
+        
+        Args:
+            progress_window: Fenêtre de progression
+            status: 'error', 'processing' ou 'pending'
+        """
+        import subprocess
+        import sys
+        import os
+        
+        # Obtenir le répertoire du projet (où se trouve le script)
+        project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        supplier_dir = self.scraper.name.lower()
+        
+        # Construire la commande selon le statut
+        if status == 'error':
+            cmd = [
+                sys.executable,
+                os.path.join(supplier_dir, 'scraper-collect.py'),
+                '--category', self.current_category,
+                '--retry-errors-only'
+            ]
+        else:
+            # Pour pending et processing, on utilise scraper-collect.py avec filtrage par statut
+            cmd = [
+                sys.executable,
+                os.path.join(supplier_dir, 'scraper-collect.py'),
+                '--category', self.current_category,
+                '--gamme-status', status
+            ]
         
         progress_window.add_log(f"Répertoire: {project_dir}")
         progress_window.add_log(f"Commande: {' '.join(cmd)}\n")

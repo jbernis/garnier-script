@@ -88,7 +88,7 @@ def collect_from_subcategory_url(subcategory_url, category, subcategory_name, ou
             subcategories = None
         
         products = scraper_module.get_products_from_category(
-            driver, session, subcategory_url, subcategory_name, Args()
+            driver, session, subcategory_url, subcategory_name, Args(), is_subcategory=True
         )
         
         logger.info(f"Produits trouvés: {len(products)}")
@@ -108,8 +108,15 @@ def collect_from_subcategory_url(subcategory_url, category, subcategory_name, ou
             logger.info(f"\n  [{idx}/{len(products)}] {product_name}")
             
             try:
-                # Extraire les détails du produit
-                details = product_info.get('details', {})
+                # Extraire les détails complets du produit (y compris les variants)
+                logger.info(f"    Extraction des détails depuis {product_url}")
+                details, driver, session = scraper_module.get_product_details(
+                    driver, session, product_url, product_name, headless=headless
+                )
+                
+                if not details:
+                    logger.warning(f"    Impossible d'extraire les détails pour {product_code}")
+                    raise Exception("Détails non trouvés")
                 
                 title = details.get('name') or details.get('full_name') or product_name
                 description = details.get('description', '')
@@ -147,6 +154,15 @@ def collect_from_subcategory_url(subcategory_url, category, subcategory_name, ou
                         variant_url = variant_info.get('url') or product_url
                         size_text = variant_info.get('size') or variant_info.get('size_text') or ''
                         
+                        # Extraire les données du variant si disponibles
+                        variant_sku = variant_info.get('sku') or variant_info.get('full_code') or ''
+                        variant_gencode = variant_info.get('gencode') or variant_info.get('gtin') or ''
+                        variant_price_pvc = variant_info.get('pvc') or variant_info.get('price_pvc') or variant_info.get('price') or ''
+                        variant_price_pa = variant_info.get('pa') or variant_info.get('price_pa') or None
+                        variant_size = variant_info.get('size') or variant_info.get('size_text') or ''
+                        variant_color = variant_info.get('color') or ''
+                        variant_stock = variant_info.get('stock') or variant_info.get('inventory') or None
+                        
                         try:
                             variant_id, is_new = db.add_variant(
                                 product_id=product_id,
@@ -156,21 +172,41 @@ def collect_from_subcategory_url(subcategory_url, category, subcategory_name, ou
                                 raise_on_duplicate=False
                             )
                             
-                            if is_new:
-                                variants_added += 1
-                                logger.info(f"      ✓ Variant {variant_code} ajouté")
-                            else:
-                                db.update_variant_collect(
+                            # Si les données essentielles sont disponibles, les stocker directement
+                            if variant_sku and variant_price_pvc:
+                                # Marquer comme completed si toutes les données sont présentes
+                                db.update_variant_data(
                                     variant_id=variant_id,
-                                    url=variant_url,
-                                    size_text=size_text
+                                    sku=variant_sku,
+                                    gencode=variant_gencode if variant_gencode else None,
+                                    price_pvc=variant_price_pvc,
+                                    price_pa=variant_price_pa if variant_price_pa else None,
+                                    stock=variant_stock if variant_stock is not None else None,
+                                    size=variant_size if variant_size else None,
+                                    color=variant_color if variant_color else None,
+                                    status='completed',
+                                    error_message=None
                                 )
                                 variants_added += 1
-                                logger.info(f"      ✓ Variant {variant_code} mis à jour")
+                                logger.info(f"      ✓ Variant {variant_code} ajouté avec données complètes")
+                            else:
+                                # Sinon, mettre à jour seulement les champs de base et laisser en pending
+                                if not is_new:
+                                    db.update_variant_collect(
+                                        variant_id=variant_id,
+                                        url=variant_url,
+                                        size_text=size_text
+                                    )
+                                variants_added += 1
+                                logger.info(f"      ✓ Variant {variant_code} ajouté (données à compléter)")
                         except Exception as variant_error:
                             logger.error(f"      ✗ Erreur variant {variant_code}: {variant_error}")
                 
                 logger.info(f"    {product_code}: {variants_added} variant(s) collecté(s)")
+                
+                # Mettre à jour le status du produit si tous les variants sont traités
+                db.update_product_status_if_all_variants_processed(product_id)
+                
                 total_products_collected += 1
                 
             except Exception as e:

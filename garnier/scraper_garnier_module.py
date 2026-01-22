@@ -39,10 +39,13 @@ def get_categories(driver, session):
     module = _get_scraper_module()
     return module.get_categories(driver, session)
 
-def get_gammes_from_category(driver, session, category_name):
-    """Récupère les gammes d'une catégorie."""
+def get_gammes_from_category(driver, session, category_url, db, category, start_page=1):
+    """
+    Récupère les gammes d'une catégorie depuis son URL et les écrit dans la DB.
+    Retourne la liste des gamme_ids créés.
+    """
     module = _get_scraper_module()
-    return module.get_gammes_from_category(driver, session, category_name)
+    return module.get_gammes_from_category(driver, session, category_url, db, category, start_page)
 
 def get_products_from_gamme(driver, session, gamme_url, headless=True):
     """Récupère les produits d'une gamme."""
@@ -80,7 +83,9 @@ def extract_variants_from_product_page(driver, session, product_url, product_cod
             for option in options:
                 value = option.get('value', '')
                 text = option.get_text(strip=True)
-                code_match = re.search(r'code_vl=(\d+)', value)
+                # Modifier la regex pour capturer tout le code_vl (chiffres + lettres)
+                # Exemple: "code_vl=32958B" -> capture "32958B"
+                code_match = re.search(r'code_vl=([^&\s#]+)', value)
                 if code_match:
                     variant_code = code_match.group(1)
                     all_code_vl.append({

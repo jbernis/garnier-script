@@ -84,16 +84,24 @@ def collect_from_gamme_url(gamme_url, output_db='garnier_products.db', headless=
         
         # Extraire le nom de la gamme depuis l'URL
         parsed = urlparse(gamme_url)
-        gamme_name = "GAMME SPECIFIQUE"
+        gamme_name = None
         if 'code_gamme' in parsed.query:
             gamme_name = unquote(parsed.query.split('code_gamme=')[1].split('&')[0])
             # Nettoyer le nom et mettre en majuscule
             gamme_name = gamme_name.replace('_', ' ').replace('-', ' ').upper()
         
+        # Ajouter ou mettre à jour la gamme dans la DB
+        gamme_id = db.add_gamme(url=gamme_url, category=category, name=gamme_name)
+        
+        # Marquer la gamme comme en cours de traitement
+        if gamme_name:  # Seulement si la gamme a un nom (pas en erreur)
+            db.update_gamme_status(gamme_id, 'processing')
+        
         logger.info(f"\n{'='*60}")
-        logger.info(f"Traitement de la gamme: {gamme_name}")
+        logger.info(f"Traitement de la gamme: {gamme_name or 'SANS NOM'} (ID: {gamme_id})")
         logger.info(f"Catégorie: {category}")
         logger.info(f"URL: {gamme_url}")
+        logger.info(f"Status: {'processing' if gamme_name else 'error'}")
         logger.info(f"{'='*60}")
         
         # Récupérer les produits en erreur pour les retenter (max 3 tentatives)
@@ -277,10 +285,13 @@ def collect_from_gamme_url(gamme_url, output_db='garnier_products.db', headless=
                     product_type=category,
                     tags=category,
                     category=category,
-                    gamme=gamme_name,
+                    gamme=gamme_name,  # Garder pour compatibilité
                     base_url=base_url_without_params,
                     is_new=is_new_product
                 )
+                
+                # Lier le produit à la gamme dans la table gamme_products
+                db.link_gamme_to_product(gamme_id, product_id)
                 
                 # Extraire et ajouter les images du produit depuis la page produit
                 # Utiliser l'URL du premier variant pour extraire les images
@@ -348,6 +359,15 @@ def collect_from_gamme_url(gamme_url, output_db='garnier_products.db', headless=
                 
                 for retry_attempt in range(1, max_retries + 1):
                     logger.info(f"    Tentative de retry {retry_attempt}/{max_retries} pour {product_code}...")
+                    
+                    # Ré-authentifier au 2ème essai pour rafraîchir la session
+                    if retry_attempt == 2:
+                        logger.info(f"    🔐 Ré-authentification avant retry {retry_attempt}...")
+                        try:
+                            driver, session = authenticate(headless=headless)
+                            logger.info(f"    ✓ Ré-authentification réussie")
+                        except Exception as auth_error:
+                            logger.error(f"    ✗ Erreur lors de la ré-authentification: {auth_error}")
                     
                     # Vérifier que l'URL retourne 200 avant chaque retry
                     url_returns_200 = False
@@ -548,9 +568,16 @@ def collect_from_gamme_url(gamme_url, output_db='garnier_products.db', headless=
         logger.info(f"Variants par statut: {stats['variants_by_status']}")
         logger.info(f"{'='*60}")
         
+        # Vérifier et mettre à jour le statut de la gamme
+        logger.info(f"\nVérification du statut de la gamme {gamme_id}...")
+        db.update_gamme_status_if_all_products_processed(gamme_id)
+        
         # Retry automatique si demandé
         if retry_errors_after:
             retry_error_products(db, driver, session, category=category, gamme=gamme_name, headless=headless)
+            # Revérifier le statut après le retry
+            logger.info(f"\nVérification finale du statut de la gamme {gamme_id} après retry...")
+            db.update_gamme_status_if_all_products_processed(gamme_id)
         
         # Fermer la DB avant de retourner
         db.close()
@@ -598,7 +625,7 @@ def collect_from_gamme_url(gamme_url, output_db='garnier_products.db', headless=
                 pass
 
 
-def collect_urls(categories=None, output_db='garnier_products.db', headless=True, retry_errors_after=False):
+def collect_urls(categories=None, output_db='garnier_products.db', headless=True, retry_errors_after=False, gamme_status_filter=None):
     """
     Collecte toutes les URLs avec code_vl et les stocke dans la base de données.
     
@@ -606,6 +633,8 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
         categories: Liste de catégories à traiter (None = toutes)
         output_db: Chemin vers la base de données SQLite
         headless: Mode headless pour Selenium
+        retry_errors_after: Retenter automatiquement les produits en erreur après collecte
+        gamme_status_filter: Filtrer les gammes par statut ('pending', 'processing', 'error', 'completed')
     """
     db = GarnierDB(output_db)
     
@@ -743,14 +772,42 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
             logger.info(f"{'='*60}")
             
             # Obtenir les gammes de cette catégorie
-            gammes = get_gammes_from_category(driver, session, category_url)
-            logger.info(f"Gammes trouvées: {len(gammes)}")
+            if gamme_status_filter:
+                # Filtrer par statut dans la DB (ne pas parser le site)
+                logger.info(f"Filtrage des gammes par statut: {gamme_status_filter}")
+                gammes = db.get_gammes_by_status(status=gamme_status_filter, category=category_name)
+                gamme_ids = [g['id'] for g in gammes]
+                logger.info(f"Gammes {gamme_status_filter} trouvées en DB: {len(gamme_ids)}")
+            else:
+                # Parser le site et écrire dans la DB
+                gamme_ids = get_gammes_from_category(
+                    driver, 
+                    session, 
+                    category_url,
+                    db=db,
+                    category=category_name
+                )
+                logger.info(f"Gammes trouvées et écrites en DB: {len(gamme_ids)}")
             
-            # Parcourir chaque gamme
-            for gamme_info in gammes:
-                gamme_name = gamme_info['name']
-                gamme_url = gamme_info['url']
-                logger.info(f"\n  Gamme: {gamme_name}")
+            # Parcourir chaque gamme (par ID maintenant)
+            for gamme_id in gamme_ids:
+                # Récupérer les infos de la gamme depuis la DB
+                gamme = db.get_gamme_by_id(gamme_id)
+                if not gamme:
+                    logger.warning(f"Gamme {gamme_id} introuvable dans la DB, ignorée")
+                    continue
+                
+                gamme_name = gamme.get('name')  # Peut être None
+                gamme_url = gamme.get('url')
+                gamme_status = gamme.get('status')
+                
+                # Marquer la gamme comme en cours de traitement
+                if gamme_status != 'error':  # Ne pas traiter les gammes en erreur (sans nom)
+                    db.update_gamme_status(gamme_id, 'processing')
+                    logger.info(f"\n  Gamme: {gamme_name or 'SANS NOM'} (ID: {gamme_id}) - Status: processing")
+                else:
+                    logger.info(f"\n  Gamme: {gamme_name or 'SANS NOM'} (ID: {gamme_id}) - Status: error (ignorée)")
+                    continue
                 
                 # Obtenir les produits de cette gamme
                 products = get_products_from_gamme(driver, session, gamme_url, headless=headless)
@@ -815,6 +872,9 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
                             base_url=base_url_without_params,
                             is_new=is_new_product
                         )
+                        
+                        # Lier le produit à sa gamme dans la table gamme_products
+                        db.link_gamme_to_product(gamme_id, product_id)
                         
                         # Extraire et ajouter les images du produit depuis la page produit
                         # Utiliser l'URL du premier variant pour extraire les images
@@ -882,6 +942,15 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
                         
                         for retry_attempt in range(1, max_retries + 1):
                             logger.info(f"    Tentative de retry {retry_attempt}/{max_retries} pour {product_code}...")
+                            
+                            # Ré-authentifier au 2ème essai pour rafraîchir la session
+                            if retry_attempt == 2:
+                                logger.info(f"    🔐 Ré-authentification avant retry {retry_attempt}...")
+                                try:
+                                    driver, session = authenticate(headless=headless)
+                                    logger.info(f"    ✓ Ré-authentification réussie")
+                                except Exception as auth_error:
+                                    logger.error(f"    ✗ Erreur lors de la ré-authentification: {auth_error}")
                             
                             # Vérifier que l'URL retourne 200 avant chaque retry
                             url_returns_200 = False
@@ -965,6 +1034,9 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
                                         base_url=base_url_without_params,
                                         is_new=is_new_product
                                     )
+                                    
+                                    # Lier le produit à sa gamme dans la table gamme_products
+                                    db.link_gamme_to_product(gamme_id, product_id)
                                     
                                     # Extraire et ajouter les images du produit depuis la page produit
                                     if variants:
@@ -1071,6 +1143,11 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
                             except Exception as db_error:
                                 logger.warning(f"    Impossible de marquer le produit en erreur dans la DB: {db_error}")
                         continue
+                
+                # Fin du traitement de tous les produits de cette gamme
+                # Vérifier et mettre à jour le statut de la gamme
+                logger.info(f"\n  Vérification du statut de la gamme {gamme_id}...")
+                db.update_gamme_status_if_all_products_processed(gamme_id)
         
         # Afficher les statistiques
         stats = db.get_stats()
@@ -1191,6 +1268,15 @@ def retry_error_products(db, driver, session, category=None, gamme=None, headles
         
         for retry_attempt in range(1, max_retries + 1):
             logger.info(f"    Tentative {retry_attempt}/{max_retries} pour {product_code}")
+            
+            # Ré-authentifier au 2ème essai pour rafraîchir la session
+            if retry_attempt == 2:
+                logger.info(f"    🔐 Ré-authentification avant retry {retry_attempt}...")
+                try:
+                    driver, session = authenticate(headless=headless)
+                    logger.info(f"    ✓ Ré-authentification réussie")
+                except Exception as auth_error:
+                    logger.error(f"    ✗ Erreur lors de la ré-authentification: {auth_error}")
             
             # Vérifier que l'URL retourne 200
             url_returns_200 = False
@@ -1367,6 +1453,12 @@ if __name__ == '__main__':
     )
     
     parser.add_argument(
+        '--gamme-status',
+        choices=['pending', 'processing', 'error', 'completed'],
+        help='Filtrer les gammes par statut (pending, processing, error, completed)'
+    )
+    
+    parser.add_argument(
         '--db', '-d',
         default=None,  # None = valeur par défaut depuis app_config.json
         help='Chemin vers la base de données SQLite (défaut: garnier_products.db depuis app_config.json)'
@@ -1483,7 +1575,8 @@ if __name__ == '__main__':
             categories=args.category,
             output_db=output_db,
             headless=not args.no_headless,
-            retry_errors_after=args.retry_errors_after
+            retry_errors_after=args.retry_errors_after,
+            gamme_status_filter=args.gamme_status
         )
         
         # #region agent log

@@ -36,6 +36,7 @@ load_dotenv()
 def process_variant(variant_id, code_vl, url, db, driver, session, headless=True):
     """
     Traite un variant spécifique pour extraire ses données détaillées.
+    Pour les variants en erreur, réextrait les données depuis l'URL du produit parent.
     
     Args:
         variant_id: ID du variant dans la DB
@@ -53,25 +54,113 @@ def process_variant(variant_id, code_vl, url, db, driver, session, headless=True
         db.mark_variant_processing(variant_id)
         logger.info(f"  Traitement du variant {code_vl}...")
         
-        # Extraire les données du variant en utilisant les fonctions du scraper existant
-        # Note: Le scraper existant extrait déjà les prix/SKU lors de la collecte
-        # Ici on pourrait faire une extraction supplémentaire si nécessaire
+        # Récupérer les informations du variant
+        variant_info = db.get_variant_by_code_vl(code_vl)
+        if not variant_info:
+            logger.error(f"    ✗ Variant {code_vl} non trouvé dans la base")
+            db.mark_variant_error(variant_id, "Variant non trouvé dans la base")
+            return False
         
-        # Pour l'instant, marquer comme complété car les données sont déjà extraites
-        # lors de la collecte (le scraper Artiga extrait tout en une fois)
-        db.update_variant_data(
-            variant_id=variant_id,
-            status='completed'
+        product_id = variant_info['product_id']
+        product_code = variant_info['product_code']
+        
+        # Récupérer l'URL du produit parent
+        cursor = db.conn.cursor()
+        cursor.execute('SELECT base_url FROM products WHERE id = ?', (product_id,))
+        product_row = cursor.fetchone()
+        if not product_row or not product_row['base_url']:
+            logger.error(f"    ✗ URL produit non trouvée pour {code_vl}")
+            db.mark_variant_error(variant_id, "URL produit non trouvée")
+            return False
+        
+        product_url = product_row['base_url']
+        
+        # Vérifier que l'URL retourne 200 avant de retenter
+        try:
+            response = session.get(product_url, timeout=10, allow_redirects=True)
+            if response.status_code != 200:
+                logger.warning(f"    ✗ URL produit retourne {response.status_code} pour {code_vl}")
+                db.mark_variant_error(variant_id, f"URL produit retourne {response.status_code}")
+                return False
+        except Exception as url_error:
+            logger.warning(f"    ✗ URL produit non accessible pour {code_vl}: {url_error}")
+            db.mark_variant_error(variant_id, f"URL produit non accessible: {url_error}")
+            return False
+        
+        # Réextraire les données du produit pour obtenir les variants mis à jour
+        logger.info(f"    Réextraction depuis {product_url}")
+        details, driver, session = scraper_module.get_product_details(
+            driver, session, product_url, product_code, headless=headless
         )
         
-        # Mettre à jour le status du produit parent si tous les variants sont traités
-        variant_info = db.get_variant_by_code_vl(code_vl)
-        if variant_info:
-            product_id = variant_info['product_id']
-            db.update_product_status_if_all_variants_processed(product_id)
+        if not details or not details.get('variants'):
+            logger.error(f"    ✗ Impossible de réextraire les détails pour {code_vl}")
+            db.mark_variant_error(variant_id, "Impossible de réextraire les détails")
+            return False
         
-        logger.info(f"    ✓ Variant {code_vl} traité avec succès")
-        return True
+        # Chercher le variant correspondant dans les détails
+        variant_found = False
+        for variant_data in details.get('variants', []):
+            variant_data_code = variant_data.get('full_code') or variant_data.get('sku') or variant_data.get('code') or ''
+            if variant_data_code == code_vl or variant_data.get('code_vl') == code_vl:
+                variant_found = True
+                
+                # Extraire les données du variant
+                variant_sku = variant_data.get('sku') or variant_data.get('full_code') or ''
+                variant_gencode = variant_data.get('gencode') or ''
+                variant_price_pvc = variant_data.get('pvc') or variant_data.get('price_pvc') or ''
+                variant_price_pa = variant_data.get('pa') or variant_data.get('price_pa') or None
+                variant_size = variant_data.get('size') or ''
+                variant_color = variant_data.get('color') or ''
+                
+                # Vérifier si toutes les données sont présentes
+                missing_fields = []
+                if not variant_sku or not variant_sku.strip():
+                    missing_fields.append('SKU')
+                if not variant_gencode or not variant_gencode.strip():
+                    missing_fields.append('gencode')
+                if not variant_price_pvc or not variant_price_pvc.strip():
+                    missing_fields.append('prix')
+                
+                if missing_fields:
+                    error_msg = f"Champ(s) manquant(s): {', '.join(missing_fields)}"
+                    db.update_variant_data(
+                        variant_id=variant_id,
+                        sku=variant_sku if variant_sku else None,
+                        gencode=variant_gencode if variant_gencode else None,
+                        price_pvc=variant_price_pvc if variant_price_pvc else None,
+                        price_pa=variant_price_pa if variant_price_pa else None,
+                        size=variant_size if variant_size else None,
+                        color=variant_color if variant_color else None,
+                        status='error',
+                        error_message=error_msg
+                    )
+                    logger.warning(f"    ✗ Variant {code_vl} toujours en erreur: {error_msg}")
+                    return False
+                else:
+                    # Toutes les données sont présentes, marquer comme completed
+                    db.update_variant_data(
+                        variant_id=variant_id,
+                        sku=variant_sku,
+                        gencode=variant_gencode,
+                        price_pvc=variant_price_pvc,
+                        price_pa=variant_price_pa,
+                        size=variant_size if variant_size else None,
+                        color=variant_color if variant_color else None,
+                        status='completed',
+                        error_message=None
+                    )
+                    
+                    # Mettre à jour le status du produit parent si tous les variants sont traités
+                    db.update_product_status_if_all_variants_processed(product_id)
+                    
+                    logger.info(f"    ✓ Variant {code_vl} traité avec succès (SKU: {variant_sku}, Gencode: {variant_gencode}, Prix: {variant_price_pvc})")
+                    return True
+        
+        if not variant_found:
+            logger.error(f"    ✗ Variant {code_vl} non trouvé dans les détails du produit")
+            db.mark_variant_error(variant_id, "Variant non trouvé dans les détails du produit")
+            return False
         
     except Exception as e:
         error_msg = str(e)

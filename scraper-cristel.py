@@ -24,7 +24,7 @@ from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, InvalidSessionIdException, UnexpectedAlertPresentException
 from csv_config import get_csv_config
 
 # Logging - sera configuré par le script principal qui importe ce module
@@ -74,6 +74,12 @@ def get_selenium_driver(headless: bool = True):
     chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument(f'user-agent={HEADERS["User-Agent"]}')
     chrome_options.add_argument('--window-size=1920,1080')
+    # Préférences pour désactiver les alertes JavaScript
+    prefs = {
+        "profile.default_content_setting_values.notifications": 2,
+        "profile.default_content_settings.popups": 0
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
     
     try:
         # Essayer avec webdriver-manager si disponible
@@ -118,6 +124,52 @@ def check_and_recreate_driver(driver: Optional[webdriver.Chrome], session: reque
         return driver, session
 
 
+def handle_javascript_alerts(driver: webdriver.Chrome) -> None:
+    """
+    Gère les alertes JavaScript inattendues en les fermant automatiquement.
+    Désactive aussi les alertes futures en injectant du JavaScript.
+    """
+    # D'abord, injecter du JavaScript pour désactiver les alertes futures
+    try:
+        driver.execute_script("""
+            window.alert = function() {};
+            window.confirm = function() { return true; };
+            window.prompt = function() { return null; };
+        """)
+    except Exception:
+        pass
+    
+    # Ensuite, gérer les alertes qui pourraient être déjà présentes
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            # Vérifier s'il y a une alerte présente
+            alert = driver.switch_to.alert
+            alert_text = alert.text
+            logger.warning(f"Alerte JavaScript détectée et fermée automatiquement (tentative {attempt + 1}): {alert_text}")
+            alert.accept()
+            # Revenir au contexte par défaut
+            driver.switch_to.default_content()
+            # Attendre un peu pour que l'alerte soit complètement fermée
+            time.sleep(0.5)
+        except UnexpectedAlertPresentException:
+            # Si une alerte est présente mais qu'on ne peut pas la gérer directement,
+            # essayer de l'accepter
+            try:
+                alert = driver.switch_to.alert
+                alert.accept()
+                driver.switch_to.default_content()
+                time.sleep(0.5)
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    time.sleep(0.5)
+                    continue
+                logger.warning(f"Impossible de gérer l'alerte JavaScript après {max_attempts} tentatives: {e}")
+        except Exception:
+            # Pas d'alerte présente, c'est normal
+            break
+
+
 def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session) -> List[Dict[str, str]]:
     """
     Extrait les catégories principales depuis le menu de navigation du site Cristel.
@@ -130,6 +182,8 @@ def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session
         if driver:
             driver.get(BASE_URL)
             time.sleep(5)  # Attendre le chargement JavaScript
+            # Gérer les alertes JavaScript qui pourraient apparaître
+            handle_javascript_alerts(driver)
             html = driver.page_source
             soup = BeautifulSoup(html, 'html.parser')
         else:
@@ -258,6 +312,8 @@ def get_subcategories(driver: Optional[webdriver.Chrome], session: requests.Sess
         # Aller sur la page principale pour voir le menu complet avec toutes les catégories et sous-catégories
         driver.get(BASE_URL)
         time.sleep(3)
+        # Gérer les alertes JavaScript qui pourraient apparaître
+        handle_javascript_alerts(driver)
         
         html = driver.page_source
         soup = BeautifulSoup(html, 'html.parser')
@@ -356,12 +412,15 @@ def get_subcategories(driver: Optional[webdriver.Chrome], session: requests.Sess
         return []
 
 
-def get_products_from_category(driver: Optional[webdriver.Chrome], session: requests.Session, category_url: str, category_name: str, args=None) -> List[Dict[str, str]]:
+def get_products_from_category(driver: Optional[webdriver.Chrome], session: requests.Session, category_url: str, category_name: str, args=None, is_subcategory: bool = False) -> List[Dict[str, str]]:
     """
     Extrait la liste des produits d'une catégorie Cristel.
     Structure: Catégorie → Sous-catégories (class="liste") → Cartes produits → Page produit
+    
+    Args:
+        is_subcategory: Si True, ne cherche pas de sous-catégories et extrait directement les produits
     """
-    logger.info(f"Extraction des produits de la catégorie: {category_name}")
+    logger.info(f"Extraction des produits de {'la sous-catégorie' if is_subcategory else 'la catégorie'}: {category_name}")
     all_products = []
     
     try:
@@ -372,36 +431,41 @@ def get_products_from_category(driver: Optional[webdriver.Chrome], session: requ
         # Vérifier et recréer le driver si nécessaire
         driver, session = check_and_recreate_driver(driver, session, headless=True)
         
-        # Étape 1: Extraire les sous-catégories de cette catégorie principale
-        all_subcategories = get_subcategories(driver, session, category_url, category_name)
-        
-        # Filtrer les sous-catégories si spécifiées (via args.subcategories)
-        if args and hasattr(args, 'subcategories') and args.subcategories:
-            # Filtrer les sous-catégories selon la sélection
-            selected_subcategories = []
-            selected_lower = [name.lower().strip() for name in args.subcategories]
-            
-            for subcat in all_subcategories:
-                subcat_name_lower = subcat['name'].lower()
-                if any(selected in subcat_name_lower or subcat_name_lower in selected for selected in selected_lower):
-                    selected_subcategories.append(subcat)
-            
-            if selected_subcategories:
-                subcategories = selected_subcategories
-                logger.info(f"Filtrage: {len(subcategories)} sous-catégorie(s) sélectionnée(s) sur {len(all_subcategories)} disponible(s)")
-            else:
-                logger.warning(f"Aucune sous-catégorie trouvée correspondant à: {', '.join(args.subcategories)}")
-                logger.info(f"Sous-catégories disponibles pour {category_name}:")
-                for subcat in all_subcategories:
-                    logger.info(f"  - {subcat['name']}")
-                subcategories = []
-        else:
-            subcategories = all_subcategories
-        
-        # Si pas de sous-catégories trouvées, essayer directement avec la catégorie principale
-        if not subcategories:
-            logger.info(f"Aucune sous-catégorie trouvée pour {category_name}, extraction directe depuis la catégorie...")
+        # Si on est déjà au niveau sous-catégorie, ne pas chercher d'autres sous-catégories
+        if is_subcategory:
+            logger.info(f"Extraction directe des produits depuis l'URL de la sous-catégorie")
             subcategories = [{'name': category_name, 'url': category_url, 'parent': category_name}]
+        else:
+            # Étape 1: Extraire les sous-catégories de cette catégorie principale
+            all_subcategories = get_subcategories(driver, session, category_url, category_name)
+        
+            # Filtrer les sous-catégories si spécifiées (via args.subcategories)
+            if args and hasattr(args, 'subcategories') and args.subcategories:
+                # Filtrer les sous-catégories selon la sélection
+                selected_subcategories = []
+                selected_lower = [name.lower().strip() for name in args.subcategories]
+                
+                for subcat in all_subcategories:
+                    subcat_name_lower = subcat['name'].lower()
+                    if any(selected in subcat_name_lower or subcat_name_lower in selected for selected in selected_lower):
+                        selected_subcategories.append(subcat)
+                
+                if selected_subcategories:
+                    subcategories = selected_subcategories
+                    logger.info(f"Filtrage: {len(subcategories)} sous-catégorie(s) sélectionnée(s) sur {len(all_subcategories)} disponible(s)")
+                else:
+                    logger.warning(f"Aucune sous-catégorie trouvée correspondant à: {', '.join(args.subcategories)}")
+                    logger.info(f"Sous-catégories disponibles pour {category_name}:")
+                    for subcat in all_subcategories:
+                        logger.info(f"  - {subcat['name']}")
+                    subcategories = []
+            else:
+                subcategories = all_subcategories
+            
+            # Si pas de sous-catégories trouvées, essayer directement avec la catégorie principale
+            if not subcategories:
+                logger.info(f"Aucune sous-catégorie trouvée pour {category_name}, extraction directe depuis la catégorie...")
+                subcategories = [{'name': category_name, 'url': category_url, 'parent': category_name}]
         
         # Étape 2: Pour chaque sous-catégorie, extraire les produits (cartes)
         # seen_product_urls pour éviter les doublons entre sous-catégories
@@ -508,6 +572,8 @@ def get_products_from_category(driver: Optional[webdriver.Chrome], session: requ
                     logger.debug(f"Chargement de la sous-catégorie (page {page_num}): {current_url}")
                     driver.get(current_url)
                     time.sleep(5)
+                    # Gérer les alertes JavaScript qui pourraient apparaître
+                    handle_javascript_alerts(driver)
                     
                     # Faire défiler pour charger tous les produits
                     try:
@@ -777,6 +843,8 @@ def get_products_from_category(driver: Optional[webdriver.Chrome], session: requ
             try:
                 driver.get(BASE_URL)
                 time.sleep(5)
+                # Gérer les alertes JavaScript qui pourraient apparaître
+                handle_javascript_alerts(driver)
                 
                 # Faire défiler pour charger les produits
                 try:
@@ -860,6 +928,8 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
             try:
                 driver.get(product_url)
                 time.sleep(3)
+                # Gérer les alertes JavaScript qui pourraient apparaître
+                handle_javascript_alerts(driver)
                 html = driver.page_source
                 soup = BeautifulSoup(html, 'html.parser')
             except InvalidSessionIdException:
@@ -867,6 +937,8 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                 driver, session = check_and_recreate_driver(None, session, headless=headless)
                 driver.get(product_url)
                 time.sleep(3)
+                # Gérer les alertes JavaScript qui pourraient apparaître
+                handle_javascript_alerts(driver)
                 html = driver.page_source
                 soup = BeautifulSoup(html, 'html.parser')
         else:
@@ -1492,134 +1564,104 @@ def generate_shopify_csv(products_data: List[Dict]) -> pd.DataFrame:
         product_sku = product_details.get('sku', product_code)
         product_gencode = product_details.get('gencode', '')
         
+        # Générer le Handle UNE SEULE FOIS par produit (doit être le même pour tous les variants)
+        if handle_source == 'barcode':
+            handle = product_gencode or ''
+        elif handle_source == 'sku':
+            handle = product_sku or product_code or ''
+        elif handle_source == 'title':
+            handle = slugify(full_name)
+        else:
+            handle = product_gencode or product_sku or product_code or slugify(full_name)
+        
         # Créer une ligne par variante
         for variant_idx, variant in enumerate(variants):
             variant_sku = variant.get('sku') or variant.get('full_code') or product_sku
             variant_gencode = variant.get('gencode') or product_gencode
+            variant_pvc = str(variant.get('pvc') or '').replace('\n', '').replace('\r', '').strip()
             
-            # Générer le Handle selon la source configurée
-            if handle_source == 'barcode':
-                handle = variant_gencode or product_gencode or ''
-            elif handle_source == 'sku':
-                handle = variant_sku or product_sku or ''
-            elif handle_source == 'title':
-                handle = slugify(full_name)
+            # Créer une ligne vide avec toutes les colonnes configurées
+            base_row = {col: '' for col in configured_columns}
+            
+            # Remplir les champs de base (première ligne du produit/variant)
+            base_row['Handle'] = handle or ''
+            base_row['Title'] = full_name or ''
+            base_row['Body (HTML)'] = description or ''
+            base_row['Vendor'] = vendor_name
+            base_row['Product Category'] = ''
+            base_row['Type'] = category
+            base_row['Tags'] = category
+            base_row['Published'] = 'TRUE'
+            base_row['Option1 Name'] = 'Taille' if variant.get('size') else ''
+            base_row['Option1 Value'] = variant.get('size') or ''
+            base_row['Option2 Name'] = ''
+            base_row['Option2 Value'] = ''
+            base_row['Option3 Name'] = ''
+            base_row['Option3 Value'] = ''
+            base_row['Variant SKU'] = variant_sku or ''
+            base_row['Variant Grams'] = ''
+            base_row['Variant Inventory Tracker'] = 'shopify'
+            base_row['Variant Inventory Qty'] = str(variant.get('stock') or 0)
+            base_row['Variant Inventory Policy'] = 'deny'
+            base_row['Variant Fulfillment Service'] = 'manual'
+            base_row['Variant Price'] = variant_pvc  # LE PRIX VA ICI
+            base_row['Variant Compare At Price'] = variant.get('pa') or ''
+            base_row['Variant Requires Shipping'] = 'TRUE'
+            base_row['Variant Taxable'] = 'TRUE'
+            base_row['Variant Barcode'] = variant_gencode or ''
+            base_row['Gift Card'] = 'FALSE'
+            base_row['SEO Title'] = full_name or ''
+            base_row['SEO Description'] = (description[:160] if description else '') or ''
+            base_row['Google Shopping / Google Product Category'] = ''
+            base_row['Google Shopping / Gender'] = ''
+            base_row['Google Shopping / Age Group'] = ''
+            base_row['Google Shopping / MPN'] = variant.get('code') or ''
+            base_row['Google Shopping / Condition'] = 'new'
+            base_row['Google Shopping / Custom Product'] = 'FALSE'
+            base_row['Variant Image'] = image_urls[0] if image_urls and variant_idx == 0 else ''
+            base_row['Variant Weight Unit'] = 'kg'
+            base_row['Variant Tax Code'] = ''
+            base_row['Cost per item'] = variant.get('pa') or ''
+            base_row['Included / United States'] = ''
+            base_row['Price / United States'] = ''
+            base_row['Compare At Price / United States'] = ''
+            base_row['Included / International'] = ''
+            base_row['Price / International'] = ''
+            base_row['Compare At Price / International'] = ''
+            base_row['Status'] = 'active'
+            base_row['location'] = 'La Gustothèque'  # Emplacement Shopify
+            base_row['On hand (new)'] = str(variant.get('stock') or 0)  # Stock (quantité disponible)
+            base_row['On hand (current)'] = ''  # Champ vide
+            
+            # Pour le premier variant seulement, ajouter les images
+            if variant_idx == 0:
+                if not image_urls:
+                    # Si pas d'images, créer une seule ligne sans images
+                    rows.append(base_row.copy())
+                else:
+                    # Créer une ligne par image pour le premier variant
+                    for img_idx, image_url in enumerate(image_urls, start=1):
+                        row = base_row.copy()
+                        
+                        if img_idx == 1:
+                            # Première image : garder toutes les infos produit et variant (déjà dans base_row)
+                            pass
+                        else:
+                            # Images suivantes : Vider TOUS les champs sauf Handle, Image Src, Image Position, Image Alt Text
+                            # Shopify associe les images au produit via le Handle uniquement
+                            for col in configured_columns:
+                                if col not in ['Handle', 'Image Src', 'Image Position', 'Image Alt Text']:
+                                    row[col] = ''
+                        
+                        # Ajouter les informations de l'image
+                        row['Image Src'] = image_url
+                        row['Image Position'] = img_idx
+                        row['Image Alt Text'] = full_name or ''
+                        
+                        rows.append(row)
             else:
-                handle = variant_gencode or product_gencode or slugify(full_name)
-            
-            # Créer un dictionnaire avec tous les champs Shopify par défaut
-            base_row = {
-                'Handle': handle or '',
-                'Title': full_name or '',
-                'Body (HTML)': description or '',
-                'Vendor': vendor_name,
-                'Product Category': '',
-                'Type': category,
-                'Tags': category,
-                'Published': 'TRUE',
-                'Option1 Name': 'Taille' if variant.get('size') else '',
-                'Option1 Value': variant.get('size') or '',
-                'Option2 Name': '',
-                'Option2 Value': '',
-                'Option3 Name': '',
-                'Option3 Value': '',
-                'Variant SKU': variant_sku or '',
-                'Variant Grams': '',
-                'Variant Inventory Tracker': 'shopify',
-                'Variant Inventory Qty': variant.get('stock') or 0,
-                'Variant Inventory Policy': 'deny',
-                'Variant Fulfillment Service': 'manual',
-                'Variant Price': str(variant.get('pvc') or '').replace('\n', '').replace('\r', '').strip(),
-                'Variant Compare At Price': variant.get('pa') or '',
-                'Variant Requires Shipping': 'TRUE',
-                'Variant Taxable': 'TRUE',
-                'Variant Barcode': variant_gencode or '',
-                'Image Src': '',
-                'Image Position': '',
-                'Image Alt Text': '',
-                'Gift Card': 'FALSE',
-                'SEO Title': full_name or '',
-                'SEO Description': (description[:160] if description else '') or '',
-                'Google Shopping / Google Product Category': '',
-                'Google Shopping / Gender': '',
-                'Google Shopping / Age Group': '',
-                'Google Shopping / MPN': variant.get('code') or '',
-                'Google Shopping / Condition': 'new',
-                'Google Shopping / Custom Product': 'FALSE',
-                'Variant Image': image_urls[0] if image_urls and variant_idx == 0 else '',
-                'Variant Weight Unit': 'kg',
-                'Variant Tax Code': '',
-                'Cost per item': variant.get('pa') or '',
-                'Included / United States': '',
-                'Price / United States': '',
-                'Compare At Price / United States': '',
-                'Included / International': '',
-                'Price / International': '',
-                'Compare At Price / International': '',
-                'Status': 'active',
-            }
-            
-            # Si pas d'images, créer une seule ligne sans images
-            if not image_urls:
+                # Pour les autres variants, créer une seule ligne sans images (les images sont déjà définies)
                 rows.append(base_row.copy())
-            else:
-                # Créer une ligne par image/vidéo
-                for img_idx, image_url in enumerate(image_urls, start=1):
-                    row = base_row.copy()
-                    
-                    # Pour la première image, garder toutes les infos
-                    # Pour les images suivantes, vider les champs variant sauf Handle
-                    if img_idx > 1:
-                        row['Title'] = ''
-                        row['Body (HTML)'] = ''
-                        row['Vendor'] = ''
-                        row['Product Category'] = ''
-                        row['Type'] = ''
-                        row['Tags'] = ''
-                        row['Published'] = ''
-                        row['Option1 Name'] = ''
-                        row['Option1 Value'] = ''
-                        row['Option2 Name'] = ''
-                        row['Option2 Value'] = ''
-                        row['Option3 Name'] = ''
-                        row['Option3 Value'] = ''
-                        row['Variant SKU'] = ''
-                        row['Variant Grams'] = ''
-                        row['Variant Inventory Tracker'] = ''
-                        row['Variant Inventory Qty'] = ''
-                        row['Variant Inventory Policy'] = ''
-                        row['Variant Fulfillment Service'] = ''
-                        row['Variant Price'] = ''
-                        row['Variant Compare At Price'] = ''
-                        row['Variant Requires Shipping'] = ''
-                        row['Variant Taxable'] = ''
-                        row['Variant Barcode'] = ''
-                        row['Variant Image'] = ''
-                        row['Variant Weight Unit'] = ''
-                        row['Variant Tax Code'] = ''
-                        row['Cost per item'] = ''
-                        row['SEO Title'] = ''
-                        row['SEO Description'] = ''
-                        row['Google Shopping / Google Product Category'] = ''
-                        row['Google Shopping / Gender'] = ''
-                        row['Google Shopping / Age Group'] = ''
-                        row['Google Shopping / MPN'] = ''
-                        row['Google Shopping / Condition'] = ''
-                        row['Google Shopping / Custom Product'] = ''
-                        row['Included / United States'] = ''
-                        row['Price / United States'] = ''
-                        row['Compare At Price / United States'] = ''
-                        row['Included / International'] = ''
-                        row['Price / International'] = ''
-                        row['Compare At Price / International'] = ''
-                        row['Status'] = ''
-                    
-                    # Ajouter les informations de l'image
-                    row['Image Src'] = image_url
-                    row['Image Position'] = img_idx
-                    row['Image Alt Text'] = full_name or ''
-                    
-                    rows.append(row)
     
     # Créer le DataFrame
     df = pd.DataFrame(rows)

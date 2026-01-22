@@ -34,6 +34,9 @@ class SetupChecker:
     
     def check_pip(self) -> Tuple[bool, str]:
         """Vérifie que pip est installé."""
+        if getattr(sys, "frozen", False):
+            # Dans l'app packagée, sys.executable relance l'app : éviter la récursivité.
+            return False, "pip n'est pas disponible dans l'application packagée"
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "--version"],
@@ -274,6 +277,8 @@ class SetupChecker:
     def install_packages(self, requirements_files: Optional[list] = None, 
                         callback=None) -> Tuple[bool, str]:
         """Installe les packages depuis requirements.txt et requirements-gui.txt."""
+        if getattr(sys, "frozen", False):
+            return False, "Installation de packages indisponible dans l'application packagée"
         try:
             pip_ok, pip_msg = self.check_pip()
             if not pip_ok:

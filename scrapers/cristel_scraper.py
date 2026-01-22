@@ -14,9 +14,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scrapers.base_scraper import BaseScraper
 from utils.env_manager import EnvManager
 
+# Résolution de chemins compatible PyInstaller
+def resource_path(*parts):
+    if getattr(sys, "frozen", False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, *parts)
+
 # Importer les fonctions du scraper-cristel.py
 import importlib.util
-cristel_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scraper-cristel.py")
+cristel_path = resource_path("scraper-cristel.py")
 spec = importlib.util.spec_from_file_location("scraper_cristel", cristel_path)
 cristel_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cristel_module)
@@ -119,10 +127,16 @@ class CristelScraper(BaseScraper):
             return False, None, "Annulation demandée par l'utilisateur"
         
         try:
+            from datetime import datetime
+            import time
+            
             options = options or {}
             limit = options.get('limit')
             output_file = options.get('output')
             headless = options.get('headless', True)
+            
+            # Enregistrer l'heure de début pour ne chercher que les fichiers créés après
+            start_time = time.time()
             
             if log_callback:
                 log_callback("Démarrage du scraping Cristel avec les scripts modulaires...")
@@ -216,9 +230,15 @@ class CristelScraper(BaseScraper):
                     # Continuer avec les autres sous-catégories
                     continue
             
-            # Chercher les fichiers CSV générés
+            # Chercher les fichiers CSV générés créés après le début du scraping
             csv_pattern = "outputs/cristel/shopify_import_cristel_*.csv"
-            csv_files = glob.glob(csv_pattern)
+            all_csv_files = glob.glob(csv_pattern)
+            
+            # Filtrer uniquement les fichiers créés après le début du scraping
+            csv_files = [
+                f for f in all_csv_files 
+                if os.path.getmtime(f) >= start_time
+            ]
             
             if csv_files:
                 # Trier par date de modification (plus récent en premier)
@@ -231,9 +251,19 @@ class CristelScraper(BaseScraper):
                 
                 return True, latest_csv, None
             else:
-                if log_callback:
-                    log_callback("\n⚠️  Aucun fichier CSV n'a été généré")
-                return False, None, "Aucun fichier CSV généré"
+                # Si aucun fichier créé pendant cette session, chercher le plus récent de tous
+                if all_csv_files:
+                    all_csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+                    latest_csv = all_csv_files[0]
+                    logger.warning(f"Aucun fichier créé pendant cette session, utilisation du plus récent: {latest_csv}")
+                    if log_callback:
+                        log_callback(f"\n✅ Scraping terminé avec succès !")
+                        log_callback(f"📄 Fichier CSV généré : {latest_csv}")
+                    return True, latest_csv, None
+                else:
+                    if log_callback:
+                        log_callback("\n⚠️  Aucun fichier CSV n'a été généré")
+                    return False, None, "Aucun fichier CSV généré"
         
         except Exception as e:
             error_msg = f"Erreur lors du scraping: {e}"

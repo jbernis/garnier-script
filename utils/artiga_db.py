@@ -59,6 +59,7 @@ class ArtigaDB:
                 size_text TEXT,
                 status TEXT DEFAULT 'pending',
                 error_message TEXT,
+                retry_count INTEGER DEFAULT 0,
                 -- Données extraites
                 sku TEXT,
                 gencode TEXT,
@@ -73,6 +74,14 @@ class ArtigaDB:
                 FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
             )
         ''')
+        
+        # Ajouter retry_count si la colonne n'existe pas (migration)
+        try:
+            cursor.execute('ALTER TABLE product_variants ADD COLUMN retry_count INTEGER DEFAULT 0')
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            # La colonne existe déjà, ignorer
+            pass
         
         # Table des images
         cursor.execute('''
@@ -720,3 +729,220 @@ class ArtigaDB:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+    
+    # ========== Méthodes de nettoyage ==========
+    
+    def delete_all(self) -> int:
+        """
+        Supprime tous les produits, variants et images de la base de données.
+        
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products')
+        count = cursor.fetchone()[0]
+        
+        # Supprimer tous les produits (CASCADE va supprimer les dépendances)
+        cursor.execute('DELETE FROM products')
+        
+        self.conn.commit()
+        logger.info(f"Base de données Artiga vidée: {count} produits supprimés")
+        
+        return count
+    
+    def delete_by_category(self, category: str) -> int:
+        """
+        Supprime tous les produits d'une catégorie.
+        
+        Args:
+            category: Nom de la catégorie
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products WHERE category = ?', (category,))
+        count = cursor.fetchone()[0]
+        
+        # Supprimer (CASCADE va supprimer les variants et images)
+        cursor.execute('DELETE FROM products WHERE category = ?', (category,))
+        self.conn.commit()
+        
+        logger.info(f"Catégorie '{category}' supprimée: {count} produits")
+        
+        return count
+    
+    def delete_by_subcategory(self, subcategory: str) -> int:
+        """
+        Supprime tous les produits d'une sous-catégorie.
+        
+        Args:
+            subcategory: Nom de la sous-catégorie
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products WHERE subcategory = ?', (subcategory,))
+        count = cursor.fetchone()[0]
+        
+        # Supprimer (CASCADE va supprimer les variants et images)
+        cursor.execute('DELETE FROM products WHERE subcategory = ?', (subcategory,))
+        self.conn.commit()
+        
+        logger.info(f"Sous-catégorie '{subcategory}' supprimée: {count} produits")
+        
+        return count
+    
+    def delete_by_title(self, title: str) -> int:
+        """
+        Supprime les produits dont le titre contient la chaîne spécifiée (insensible à la casse).
+        
+        Args:
+            title: Chaîne à rechercher dans le titre
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Compter les produits avant suppression
+        cursor.execute('SELECT COUNT(*) FROM products WHERE title LIKE ? COLLATE NOCASE', (f'%{title}%',))
+        count = cursor.fetchone()[0]
+        
+        # Supprimer (CASCADE va supprimer les variants et images)
+        cursor.execute('DELETE FROM products WHERE title LIKE ? COLLATE NOCASE', (f'%{title}%',))
+        self.conn.commit()
+        
+        logger.info(f"Produits avec titre contenant '{title}' supprimés: {count} produits")
+        
+        return count
+    
+    def delete_by_sku(self, sku: str) -> int:
+        """
+        Supprime les variants avec le SKU spécifié et leurs produits si plus aucun variant.
+        
+        Args:
+            sku: SKU exact à supprimer
+            
+        Returns:
+            Nombre de variants supprimés
+        """
+        cursor = self.conn.cursor()
+        
+        # Trouver les variants avec ce SKU
+        cursor.execute('SELECT id, product_id FROM product_variants WHERE sku = ?', (sku,))
+        variants = cursor.fetchall()
+        
+        if not variants:
+            logger.info(f"Aucun variant trouvé avec le SKU '{sku}'")
+            return 0
+        
+        # Supprimer les variants
+        cursor.execute('DELETE FROM product_variants WHERE sku = ?', (sku,))
+        count = len(variants)
+        
+        # Pour chaque produit, vérifier s'il a encore des variants
+        product_ids = set(v['product_id'] for v in variants)
+        for product_id in product_ids:
+            cursor.execute('SELECT COUNT(*) FROM product_variants WHERE product_id = ?', (product_id,))
+            remaining = cursor.fetchone()[0]
+            
+            # Si plus de variants, supprimer le produit
+            if remaining == 0:
+                cursor.execute('DELETE FROM products WHERE id = ?', (product_id,))
+        
+        self.conn.commit()
+        logger.info(f"Variants avec SKU '{sku}' supprimés: {count} variants")
+        
+        return count
+    
+    def count_products_by_category(self, category: str) -> int:
+        """
+        Compte les produits dans une catégorie.
+        
+        Args:
+            category: Nom de la catégorie
+            
+        Returns:
+            Nombre de produits
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE category = ?', (category,))
+        return cursor.fetchone()[0]
+    
+    def count_products_by_subcategory(self, subcategory: str) -> int:
+        """
+        Compte les produits dans une sous-catégorie.
+        
+        Args:
+            subcategory: Nom de la sous-catégorie
+            
+        Returns:
+            Nombre de produits
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE subcategory = ?', (subcategory,))
+        return cursor.fetchone()[0]
+    
+    def count_products_by_title(self, title: str) -> int:
+        """
+        Compte les produits dont le titre contient la chaîne spécifiée.
+        
+        Args:
+            title: Chaîne à rechercher dans le titre
+            
+        Returns:
+            Nombre de produits
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM products WHERE title LIKE ? COLLATE NOCASE', (f'%{title}%',))
+        return cursor.fetchone()[0]
+    
+    def count_variants_by_sku(self, sku: str) -> int:
+        """
+        Compte les variants avec le SKU spécifié.
+        
+        Args:
+            sku: SKU exact à rechercher
+            
+        Returns:
+            Nombre de variants
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM product_variants WHERE sku = ?', (sku,))
+        return cursor.fetchone()[0]
+    
+    def delete_by_product_ids(self, product_ids: list) -> int:
+        """
+        Supprime les produits spécifiés par leurs IDs.
+        
+        Args:
+            product_ids: Liste des IDs de produits à supprimer
+            
+        Returns:
+            Nombre de produits supprimés
+        """
+        if not product_ids:
+            return 0
+        
+        cursor = self.conn.cursor()
+        
+        # Créer les placeholders pour la requête
+        placeholders = ','.join(['?'] * len(product_ids))
+        
+        # Supprimer les produits (CASCADE va supprimer les variants et images)
+        cursor.execute(f'DELETE FROM products WHERE id IN ({placeholders})', product_ids)
+        count = cursor.rowcount
+        
+        self.conn.commit()
+        logger.info(f"Produits sélectionnés supprimés: {count} produits")
+        
+        return count

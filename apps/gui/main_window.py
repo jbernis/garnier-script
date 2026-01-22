@@ -14,7 +14,8 @@ from apps.gui.setup_window import SetupWindow
 from apps.gui.config_window import ConfigWindow
 from apps.gui.import_window import ImportWindow
 from apps.gui.csv_config_window import CSVConfigWindow
-from ai_editor.gui.window import AIEditorWindow
+from apps.gui.cleanup_window import CleanupWindow
+from apps.ai_editor.gui.window import AIEditorWindow
 from utils.setup_checker import SetupChecker
 from utils.cleanup import remove_outputs_directory
 from utils.app_config import get_config
@@ -49,6 +50,7 @@ class MainWindow(ctk.CTk):
         self.config_window: Optional[ConfigWindow] = None
         self.csv_config_window: Optional[CSVConfigWindow] = None
         self.import_window: Optional[ImportWindow] = None
+        self.cleanup_window: Optional[CleanupWindow] = None
         self.viewer_window: Optional[ViewerWindow] = None
         self.ai_editor_window: Optional[AIEditorWindow] = None
         self.csv_generator_window = None
@@ -143,9 +145,11 @@ class MainWindow(ctk.CTk):
             ("🏠 Accueil", self.show_home),
             ("📝 Configuration CSV", self.open_csv_config),
             ("⚙️ Configuration", self.open_config),
-            ("🔧 Setup", self.open_setup),
+            ("🗑️ Nettoyage BDD", self.open_cleanup),
             ("ℹ️ À propos", self.show_about),
         ]
+        if not getattr(sys, "frozen", False):
+            nav_buttons.insert(3, ("🔧 Setup", self.open_setup))
         
         self.nav_buttons = {}
         for text, command in nav_buttons:
@@ -154,7 +158,7 @@ class MainWindow(ctk.CTk):
                 text=text,
                 command=command,
                 width=180,
-                height=50,
+                height=30,
                 anchor="w",
                 font=ctk.CTkFont(size=14)
             )
@@ -164,6 +168,7 @@ class MainWindow(ctk.CTk):
         # Stocker les références aux boutons qui doivent être désactivés si setup n'est pas OK
         self.config_button = self.nav_buttons.get("⚙️ Configuration")
         self.csv_config_button = self.nav_buttons.get("📝 Configuration CSV")
+        self.cleanup_button = self.nav_buttons.get("🗑️ Nettoyage BDD")
         self.home_button = self.nav_buttons.get("🏠 Accueil")
         self.about_button = self.nav_buttons.get("ℹ️ À propos")
         
@@ -406,6 +411,8 @@ class MainWindow(ctk.CTk):
     
     def is_setup_ok(self) -> bool:
         """Vérifie si le setup est OK (toutes les dépendances installées)."""
+        if getattr(sys, "frozen", False):
+            return True
         # Vérifier Python, pip et Chrome
         python_ok, _ = self.setup_checker.check_python_version()
         pip_ok, _ = self.setup_checker.check_pip()
@@ -491,6 +498,24 @@ class MainWindow(ctk.CTk):
             self.csv_generator_window.destroy()
         self.csv_generator_window = None
     
+    def open_cleanup(self):
+        """Ouvre la fenêtre de nettoyage."""
+        # Vérifier que le setup est OK
+        if not self.is_setup_ok():
+            return
+        
+        if self.cleanup_window is None or not self.cleanup_window.winfo_exists():
+            self.cleanup_window = CleanupWindow(self)
+            self.cleanup_window.protocol("WM_DELETE_WINDOW", self.on_cleanup_close)
+        else:
+            self.cleanup_window.lift()
+    
+    def on_cleanup_close(self):
+        """Appelé quand la fenêtre de nettoyage est fermée."""
+        if self.cleanup_window:
+            self.cleanup_window.destroy()
+        self.cleanup_window = None
+    
     def open_setup(self):
         """Ouvre la fenêtre de setup."""
         if self.setup_window is None or not self.setup_window.winfo_exists():
@@ -530,6 +555,7 @@ class MainWindow(ctk.CTk):
         buttons_to_disable = [
             self.config_button,
             self.csv_config_button,
+            self.cleanup_button,
             self.home_button,
             self.about_button,
         ]
@@ -612,6 +638,8 @@ class MainWindow(ctk.CTk):
             self.csv_config_window.destroy()
         if self.import_window:
             self.import_window.destroy()
+        if self.cleanup_window:
+            self.cleanup_window.destroy()
         if self.setup_window:
             self.setup_window.destroy()
         if self.viewer_window:

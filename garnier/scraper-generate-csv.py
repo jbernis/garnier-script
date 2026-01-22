@@ -32,7 +32,7 @@ OUTPUT_DIR = os.getenv("GARNIER_OUTPUT_DIR", "outputs/garnier")
 
 
 def generate_csv_from_db(output_file=None, output_db='garnier_products.db', 
-                         supplier='garnier', categories=None, gamme=None):
+                         supplier='garnier', categories=None, gamme=None, max_images=None):
     """
     Génère le CSV Shopify depuis la base de données.
     
@@ -42,6 +42,7 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
         supplier: Nom du fournisseur pour la configuration CSV
         categories: Liste de catégories à inclure (None = toutes)
         gamme: Nom de la gamme à filtrer (None = toutes les gammes)
+        max_images: Nombre maximum d'images par produit (None = toutes)
     """
     db = GarnierDB(output_db)
     
@@ -51,6 +52,7 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
         shopify_columns = csv_config_manager.get_columns(supplier)
         handle_source = csv_config_manager.get_handle_source(supplier)
         vendor_name = csv_config_manager.get_vendor(supplier)
+        location_name = csv_config_manager.get_location(supplier)
         
         # Récupérer les produits avec leurs variants complétés (filtrés par catégorie/gamme si spécifié)
         products = db.get_completed_products(categories=categories, gamme=gamme)
@@ -94,6 +96,11 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
             # Récupérer les images
             images = db.get_product_images(product_id)
             image_urls = [img['image_url'] for img in images]
+            
+            # Limiter le nombre d'images si max_images est spécifié
+            if max_images and len(image_urls) > max_images:
+                logger.info(f"Limitation des images pour {product_code}: {len(image_urls)} → {max_images}")
+                image_urls = image_urls[:max_images]
             
             # Si pas d'images dans la DB, essayer de les extraire depuis le produit
             if not image_urls:
@@ -200,7 +207,7 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
                     'Price / International': '',
                     'Compare At Price / International': '',
                     'Status': 'active',
-                    'location': 'Dropshipping Garnier Thiebaut',
+                    'location': location_name,
                     'On hand (new)': variant_stock,
                     'On hand (current)': '',
                 }

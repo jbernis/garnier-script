@@ -53,7 +53,8 @@
       "On hand (current)"
     ],
     "handle_source": "barcode",
-    "vendor": "Garnier-Thiebaut"
+    "vendor": "Garnier-Thiebaut",
+    "location": "Dropshipping Garnier"
   },
   "artiga": {
     "columns": [
@@ -110,7 +111,8 @@
       "On hand (current)"
     ],
     "handle_source": "barcode",
-    "vendor": "Artiga"
+    "vendor": "Artiga",
+    "location": ""
   },
   "cristel": {
     "columns": [
@@ -167,7 +169,8 @@
       "On hand (current)"
     ],
     "handle_source": "barcode",
-    "vendor": "Cristel"
+    "vendor": "Cristel",
+    "location": ""
   },
   "commun": {
     "columns": [

@@ -56,6 +56,24 @@ html_file = os.path.join(work_dir, 'apps', 'gui', 'viewer_window_simple.html')
 if os.path.exists(html_file):
     datas.append((html_file, 'apps/gui'))
 
+# Fichiers de scripts chargés par chemin (PyInstaller ne les détecte pas)
+extra_data_files = [
+    ('scraper-artiga.py', '.'),
+    ('scraper-cristel.py', '.'),
+    ('garnier/garnier_functions.py', 'garnier'),
+    ('garnier/scraper_garnier_module.py', 'garnier'),
+    ('garnier/scraper-collect.py', 'garnier'),
+    ('garnier/scraper-process.py', 'garnier'),
+    ('garnier/scraper-generate-csv.py', 'garnier'),
+    ('garnier/scraper-gamme.py', 'garnier'),
+    ('garnier/query_product.py', 'garnier'),
+]
+
+for rel_path, dest_dir in extra_data_files:
+    src_path = os.path.join(work_dir, rel_path)
+    if os.path.exists(src_path):
+        datas.append((src_path, dest_dir))
+
 # Créer le répertoire database dans le bundle (les fichiers .db seront créés à l'exécution)
 # On inclut juste la structure de répertoire si nécessaire
 
@@ -89,6 +107,8 @@ a = Analysis(
         'apps.gui.setup_window',
         'apps.gui.viewer_window',
         'apps.gui.ai_editor_window',
+        'apps.ai_editor.gui.window',
+        'apps.ai_editor.gui.viewer',
         'apps.gui.csv_config_window',
         'apps.gui.reprocess_window',
         'apps.ai_editor.processor',
@@ -151,9 +171,6 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
     name='ScrapersShopify',
     debug=False,
@@ -161,6 +178,7 @@ exe = EXE(
     strip=False,
     upx=True,
     upx_exclude=[],
+    exclude_binaries=True,
     runtime_tmpdir=None,
     console=False,  # Pas de console pour une application GUI
     disable_windowed_traceback=False,
@@ -171,8 +189,19 @@ exe = EXE(
     icon=icon_path,  # Icône si disponible
 )
 
-app = BUNDLE(
+coll = COLLECT(
     exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='ScrapersShopify',
+)
+
+app = BUNDLE(
+    coll,
     name='ScrapersShopify.app',
     icon=icon_path,  # Icône si disponible
     bundle_identifier='com.shopify.scrapers',

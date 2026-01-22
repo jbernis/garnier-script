@@ -98,6 +98,11 @@ def main():
         action='store_true',
         help='Ignorer l\'étape de génération CSV'
     )
+    parser.add_argument(
+        '--retry-errors-after',
+        action='store_true',
+        help='Après la collecte, retenter automatiquement les produits/variants en erreur (max 3 fois total)'
+    )
     
     args = parser.parse_args()
     
@@ -129,7 +134,8 @@ def main():
                 category=args.category,
                 subcategory_name=args.subcategory,
                 output_db=output_db,
-                headless=not args.no_headless
+                headless=not args.no_headless,
+                retry_errors_after=args.retry_errors_after
             )
             
             logger.info(f"\n✓ Collecte terminée: {variants_collected} produit(s) collecté(s)")
