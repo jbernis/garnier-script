@@ -2172,8 +2172,11 @@ class AIEditorWindow(ctk.CTkToplevel):
             
             finally:
                 # Retirer le handler des loggers
-                for log in loggers_to_monitor:
-                    log.removeHandler(gui_handler)
+                try:
+                    for log in loggers_to_monitor:
+                        log.removeHandler(gui_handler)
+                except Exception:
+                    pass
         
         threading.Thread(target=process_thread, daemon=True).start()
     
@@ -2658,8 +2661,39 @@ class AIEditorWindow(ctk.CTkToplevel):
         # Récupérer l'état de la recherche Internet
         enable_search = self.enable_search_var.get()
         
+        # Créer un handler de logging pour capturer tous les logs
+        class GUILogHandler(logging.Handler):
+            def __init__(self, callback):
+                super().__init__()
+                self.callback = callback
+                
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    self.callback(msg)
+                except Exception:
+                    pass
+        
+        # Créer et configurer le handler
+        gui_handler = GUILogHandler(self.add_processing_log)
+        gui_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(message)s')
+        gui_handler.setFormatter(formatter)
+        
         def process_thread():
+            loggers_to_monitor = []
             try:
+                # Ajouter le handler aux loggers pertinents
+                loggers_to_monitor = [
+                    logging.getLogger('apps.ai_editor.processor'),
+                    logging.getLogger('apps.ai_editor.agents'),
+                    logging.getLogger('utils.ai_providers'),
+                    logging.getLogger('__main__')
+                ]
+                
+                for log in loggers_to_monitor:
+                    log.addHandler(gui_handler)
+                
                 # Créer une nouvelle connexion DB pour ce thread
                 thread_db = AIPromptsDB()
                 processor = CSVAIProcessor(thread_db)
