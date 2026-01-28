@@ -1246,7 +1246,7 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
         # Extraire les images
         images = []
         
-        # Chercher uniquement dans les divs avec class "product-img slick-slide" (sans "slick-cloned")
+        # Méthode 1: Chercher dans les divs avec class "product-img slick-slide" (sans "slick-cloned")
         product_img_divs = soup.find_all('div', class_=lambda x: x and 'product-img' in x and 'slick-slide' in x and 'slick-cloned' not in x)
         
         for div in product_img_divs:
@@ -1262,6 +1262,40 @@ def get_product_details(driver: Optional[webdriver.Chrome], session: requests.Se
                             image_url = urljoin(BASE_URL, src)
                             if image_url not in images:
                                 images.append(image_url)
+        
+        # Méthode 2 (Fallback): Si aucune image trouvée, chercher dans les divs avec seulement "product-img"
+        if not images:
+            logger.info(f"    Méthode 1 (slick-slide) n'a trouvé aucune image, utilisation du fallback...")
+            product_img_divs_simple = soup.find_all('div', class_=lambda x: x and 'product-img' in x and 'slick-cloned' not in x)
+            
+            for div in product_img_divs_simple:
+                img = div.find('img')
+                if img:
+                    src = img.get('src')
+                    if src:
+                        # Filtrage plus permissif : accepter les images avec medium_default, large_default, ou le nom du produit
+                        if 'logo' not in src.lower() and 'icon' not in src.lower() and 'banner' not in src.lower():
+                            # Accepter si l'image contient des patterns de produit Artiga
+                            if any(pattern in src.lower() for pattern in ['medium_default', 'large_default', 'product', 'produit', '/img/p/']):
+                                image_url = urljoin(BASE_URL, src)
+                                if image_url not in images:
+                                    images.append(image_url)
+                                    logger.info(f"      Image trouvée (fallback): {image_url}")
+        
+        # Méthode 3 (Fallback ultime): Si toujours aucune image, chercher toutes les balises img avec patterns spécifiques
+        if not images:
+            logger.warning(f"    Méthode 2 (product-img simple) n'a trouvé aucune image, utilisation du fallback ultime...")
+            all_imgs = soup.find_all('img')
+            for img in all_imgs:
+                src = img.get('src')
+                if src:
+                    if 'logo' not in src.lower() and 'icon' not in src.lower() and 'banner' not in src.lower():
+                        # Chercher des patterns très spécifiques aux images produit Artiga
+                        if any(pattern in src.lower() for pattern in ['medium_default', 'large_default', '/img/p/']):
+                            image_url = urljoin(BASE_URL, src)
+                            if image_url not in images:
+                                images.append(image_url)
+                                logger.info(f"      Image trouvée (fallback ultime): {image_url}")
         
         # Extraire les variants avec leurs prix spécifiques
         variants = []
