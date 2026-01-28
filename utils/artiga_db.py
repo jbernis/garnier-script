@@ -472,7 +472,7 @@ class ArtigaDB:
         ''', (error_message[:500], variant_id))
         self.conn.commit()
     
-    def get_pending_variants(self, limit: Optional[int] = None, category: Optional[str] = None, subcategory: Optional[str] = None) -> List[Dict]:
+    def get_pending_variants(self, limit: Optional[int] = None, category: Optional[str] = None, categories: Optional[List[str]] = None, subcategory: Optional[str] = None) -> List[Dict]:
         """Récupère les variants en attente de traitement."""
         cursor = self.conn.cursor()
         query = '''
@@ -483,7 +483,12 @@ class ArtigaDB:
         '''
         params = []
         
-        if category:
+        # Gérer plusieurs catégories (priorité sur category)
+        if categories and len(categories) > 0:
+            placeholders = ','.join(['?'] * len(categories))
+            query += f' AND p.category IN ({placeholders})'
+            params.extend(categories)
+        elif category:
             query += ' AND p.category = ?'
             params.append(category)
         
@@ -511,7 +516,7 @@ class ArtigaDB:
         row = cursor.fetchone()
         return dict(row) if row else None
     
-    def get_error_variants(self, limit: Optional[int] = None, category: Optional[str] = None, subcategory: Optional[str] = None) -> List[Dict]:
+    def get_error_variants(self, limit: Optional[int] = None, category: Optional[str] = None, categories: Optional[List[str]] = None, subcategory: Optional[str] = None) -> List[Dict]:
         """Récupère les variants en erreur."""
         cursor = self.conn.cursor()
         query = '''
@@ -522,7 +527,12 @@ class ArtigaDB:
         '''
         params = []
         
-        if category:
+        # Gérer plusieurs catégories (priorité sur category)
+        if categories and len(categories) > 0:
+            placeholders = ','.join(['?'] * len(categories))
+            query += f' AND p.category IN ({placeholders})'
+            params.extend(categories)
+        elif category:
             query += ' AND p.category = ?'
             params.append(category)
         
@@ -568,21 +578,66 @@ class ArtigaDB:
         ''', (product_id,))
         return [dict(row) for row in cursor.fetchall()]
     
-    def get_completed_products(self, categories: List[str] = None, subcategory: str = None) -> List[Dict]:
-        """Récupère tous les produits avec au moins un variant complété."""
+    def get_completed_products(self, categories: List[str] = None, subcategory: str = None, subcategories: List[str] = None, exclude_errors: bool = False) -> List[Dict]:
+        """Récupère tous les produits avec au moins un variant complété.
+        
+        Args:
+            categories: Liste de catégories à filtrer (None = toutes les catégories)
+            subcategory: Nom de la sous-catégorie à filtrer (None = toutes, pour compatibilité)
+            subcategories: Liste de sous-catégories à filtrer (priorité sur subcategory)
+            exclude_errors: Si True, exclut les produits avec status='error'
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Debug: afficher les paramètres reçus
+        logger.info(f"[ArtigaDB] get_completed_products appelée avec:")
+        logger.info(f"  categories: {categories}")
+        logger.info(f"  subcategory: {subcategory}")
+        logger.info(f"  subcategories: {subcategories}")
+        logger.info(f"  exclude_errors: {exclude_errors}")
+        
         cursor = self.conn.cursor()
         
         conditions = ["pv.status = 'completed'"]
         params = []
         
+        # Construire les filtres de catégories et sous-catégories
+        category_filter = None
+        subcategory_filter = None
+        
         if categories and len(categories) > 0:
             placeholders = ','.join(['?'] * len(categories))
-            conditions.append(f"p.category IN ({placeholders})")
+            category_filter = f"p.category IN ({placeholders})"
             params.extend(categories)
+            logger.info(f"[ArtigaDB] Filtrage par catégories: {categories}")
         
-        if subcategory:
-            conditions.append("p.subcategory = ?")
+        # Gérer plusieurs sous-catégories (priorité sur subcategory)
+        if subcategories and len(subcategories) > 0:
+            placeholders = ','.join(['?'] * len(subcategories))
+            subcategory_filter = f"p.subcategory IN ({placeholders})"
+            params.extend(subcategories)
+            logger.info(f"[ArtigaDB] Filtrage par sous-catégories: {subcategories}")
+        elif subcategory:
+            subcategory_filter = "p.subcategory = ?"
             params.append(subcategory)
+            logger.info(f"[ArtigaDB] Filtrage par sous-catégorie: {subcategory}")
+        else:
+            logger.info(f"[ArtigaDB] Aucun filtre de sous-catégorie appliqué")
+        
+        # Combiner les filtres avec OR si les deux sont présents, sinon utiliser celui qui existe
+        if category_filter and subcategory_filter:
+            # Les deux sont présents → utiliser OR pour combiner
+            conditions.append(f"({category_filter} OR {subcategory_filter})")
+            logger.info(f"[ArtigaDB] Combinaison des filtres avec OR: catégories ET sous-catégories")
+        elif category_filter:
+            conditions.append(category_filter)
+        elif subcategory_filter:
+            conditions.append(subcategory_filter)
+        
+        if exclude_errors:
+            conditions.append("p.status != 'error'")
+            logger.info(f"[ArtigaDB] Exclusion des erreurs activée")
         
         where_clause = " AND ".join(conditions)
         
@@ -593,9 +648,16 @@ class ArtigaDB:
             WHERE {where_clause}
             ORDER BY p.product_code
         '''
-        cursor.execute(query, params)
         
-        return [dict(row) for row in cursor.fetchall()]
+        logger.info(f"[ArtigaDB] Requête SQL: {query}")
+        logger.info(f"[ArtigaDB] Paramètres: {params}")
+        
+        cursor.execute(query, params)
+        results = [dict(row) for row in cursor.fetchall()]
+        
+        logger.info(f"[ArtigaDB] Produits retournés: {len(results)}")
+        
+        return results
     
     def get_available_categories(self) -> List[str]:
         """Récupère la liste des catégories disponibles."""

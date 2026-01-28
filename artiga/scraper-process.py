@@ -169,7 +169,7 @@ def process_variant(variant_id, code_vl, url, db, driver, session, headless=True
         return False
 
 
-def process_urls(status='pending', limit=None, retry_errors=False, output_db='artiga_products.db', headless=True, category=None, subcategory=None):
+def process_urls(status='pending', limit=None, retry_errors=False, output_db='artiga_products.db', headless=True, category=None, categories=None, subcategory=None):
     """
     Traite les variants en attente ou en erreur.
     
@@ -179,7 +179,8 @@ def process_urls(status='pending', limit=None, retry_errors=False, output_db='ar
         retry_errors: Si True, traite les variants en erreur
         output_db: Chemin vers la base de données
         headless: Mode headless pour Selenium
-        category: Filtrer par catégorie
+        category: Filtrer par catégorie (une seule, pour compatibilité)
+        categories: Filtrer par catégories (liste, prioritaire sur category)
         subcategory: Filtrer par sous-catégorie
     """
     db = ArtigaDB(output_db)
@@ -200,10 +201,10 @@ def process_urls(status='pending', limit=None, retry_errors=False, output_db='ar
         
         # Récupérer les variants à traiter
         if retry_errors:
-            variants = db.get_error_variants(limit=limit, category=category, subcategory=subcategory)
+            variants = db.get_error_variants(limit=limit, category=category, categories=categories, subcategory=subcategory)
             logger.info(f"Variants en erreur à retraiter: {len(variants)}")
         else:
-            variants = db.get_pending_variants(limit=limit, category=category, subcategory=subcategory)
+            variants = db.get_pending_variants(limit=limit, category=category, categories=categories, subcategory=subcategory)
             logger.info(f"Variants en attente: {len(variants)}")
         
         if not variants:
@@ -276,7 +277,8 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--category', '-c',
-        help='Filtrer par catégorie'
+        action='append',
+        help='Filtrer par catégorie(s) (peut être répété plusieurs fois)'
     )
     parser.add_argument(
         '--subcategory', '-s',
@@ -308,7 +310,8 @@ if __name__ == '__main__':
         retry_errors=args.retry_errors,
         output_db=output_db,
         headless=not args.no_headless,
-        category=args.category,
+        category=args.category[0] if args.category and len(args.category) == 1 else None,
+        categories=args.category if args.category and len(args.category) > 1 else None,
         subcategory=args.subcategory
     )
     

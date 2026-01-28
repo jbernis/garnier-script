@@ -24,6 +24,12 @@ class GarnierDB:
         """Initialise les tables de la base de données."""
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row  # Permet d'accéder aux colonnes par nom
+        
+        # Activer les contraintes de clés étrangères pour que CASCADE fonctionne
+        # Cela permet de supprimer automatiquement les entrées dans gamme_products
+        # quand un produit est supprimé
+        self.conn.execute('PRAGMA foreign_keys = ON')
+        
         cursor = self.conn.cursor()
         
         # Table des produits (niveau parent)
@@ -193,16 +199,31 @@ class GarnierDB:
             existing_id = existing['id']
             existing_status = existing['status']
             
-            # Toujours mettre à jour la gamme si elle est fournie (même si le produit existe)
-            # Cela permet de corriger les gammes malformées lors d'un import par GAMME
+            # Toujours mettre à jour la gamme et la catégorie si elles sont fournies (même si le produit existe)
+            # Cela permet de corriger les gammes/catégories malformées lors d'un retraitement
+            # et de mettre à jour les catégories si elles changent lors d'un retraitement
+            updates_needed = []
+            update_params = []
+            
             if gamme:
-                cursor.execute('''
+                updates_needed.append('gamme = ?')
+                update_params.append(gamme)
+                logger.debug(f"Gamme à mettre à jour pour le produit {product_code}: '{gamme}'")
+            
+            if category:
+                updates_needed.append('category = ?')
+                update_params.append(category)
+                logger.debug(f"Catégorie à mettre à jour pour le produit {product_code}: '{category}'")
+            
+            if updates_needed:
+                update_params.append(existing_id)
+                cursor.execute(f'''
                     UPDATE products 
-                    SET gamme = ?, updated_at = CURRENT_TIMESTAMP
+                    SET {', '.join(updates_needed)}, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (gamme, existing_id))
+                ''', tuple(update_params))
                 self.conn.commit()
-                logger.debug(f"Gamme mise à jour pour le produit {product_code}: '{gamme}'")
+                logger.debug(f"Gamme/catégorie mise(s) à jour pour le produit {product_code}")
             
             # Ne mettre à jour complètement que si le status existant est 'error'
             if existing_status == 'error':
@@ -615,7 +636,7 @@ class GarnierDB:
         ''', (error_message[:500], variant_id))  # Limiter la taille du message
         self.conn.commit()
     
-    def get_pending_variants(self, limit: Optional[int] = None, category: Optional[str] = None, gamme: Optional[str] = None) -> List[Dict]:
+    def get_pending_variants(self, limit: Optional[int] = None, category: Optional[str] = None, categories: Optional[List[str]] = None, gamme: Optional[str] = None) -> List[Dict]:
         """Récupère les variants en attente de traitement, optionnellement filtrés par catégorie ou gamme."""
         cursor = self.conn.cursor()
         query = '''
@@ -626,8 +647,12 @@ class GarnierDB:
         '''
         params = []
         
-        # Ajouter les filtres si spécifiés
-        if category:
+        # Gérer plusieurs catégories (priorité sur category)
+        if categories and len(categories) > 0:
+            placeholders = ','.join(['?'] * len(categories))
+            query += f' AND p.category IN ({placeholders})'
+            params.extend(categories)
+        elif category:
             query += ' AND p.category = ?'
             params.append(category)
         
@@ -656,7 +681,7 @@ class GarnierDB:
         row = cursor.fetchone()
         return dict(row) if row else None
     
-    def get_error_variants(self, limit: Optional[int] = None, category: Optional[str] = None, gamme: Optional[str] = None) -> List[Dict]:
+    def get_error_variants(self, limit: Optional[int] = None, category: Optional[str] = None, categories: Optional[List[str]] = None, gamme: Optional[str] = None) -> List[Dict]:
         """Récupère les variants en erreur, optionnellement filtrés par catégorie ou gamme."""
         cursor = self.conn.cursor()
         query = '''
@@ -667,8 +692,12 @@ class GarnierDB:
         '''
         params = []
         
-        # Ajouter les filtres si spécifiés
-        if category:
+        # Gérer plusieurs catégories (priorité sur category)
+        if categories and len(categories) > 0:
+            placeholders = ','.join(['?'] * len(categories))
+            query += f' AND p.category IN ({placeholders})'
+            params.extend(categories)
+        elif category:
             query += ' AND p.category = ?'
             params.append(category)
         
@@ -754,22 +783,65 @@ class GarnierDB:
         ''')
         return [row['category'] for row in cursor.fetchall()]
     
-    def get_available_gammes(self) -> List[str]:
+    def get_available_gammes(self, category: str = None) -> List[str]:
         """
         Récupère la liste des gammes disponibles dans la DB.
-        Filtre uniquement les gammes qui ont au moins 1 produit avec au moins 1 variant en status 'completed'.
+        Si une catégorie est spécifiée, retourne toutes les gammes de cette catégorie depuis la table gammes.
+        Sinon, filtre uniquement les gammes qui ont au moins 1 produit avec au moins 1 variant en status 'completed'.
+        
+        Args:
+            category: Filtrer par catégorie (optionnel)
+        
+        Returns:
+            Liste des gammes disponibles
         """
         cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT DISTINCT p.gamme
-            FROM products p
-            INNER JOIN product_variants v ON p.id = v.product_id
-            WHERE p.gamme IS NOT NULL 
-            AND p.gamme != ''
-            AND v.status = 'completed'
-            ORDER BY p.gamme
-        ''')
-        return [row['gamme'] for row in cursor.fetchall()]
+        
+        if category:
+            # Si une catégorie est spécifiée, utiliser la table gammes comme source principale
+            # (c'est la source de vérité pour les gammes par catégorie)
+            # Retourner toutes les gammes de cette catégorie, même si name est NULL
+            query = '''
+                SELECT DISTINCT COALESCE(g.name, '') as gamme
+                FROM gammes g
+                WHERE g.category = ?
+                ORDER BY gamme
+            '''
+            params = [category]
+            
+            cursor.execute(query, params)
+            gammes_from_table = [row['gamme'] for row in cursor.fetchall() if row['gamme']]
+            
+            # Aussi vérifier s'il y a des gammes dans products qui ne sont pas dans gammes
+            query_products = '''
+                SELECT DISTINCT p.gamme
+                FROM products p
+                WHERE p.category = ?
+                AND p.gamme IS NOT NULL 
+                AND p.gamme != ''
+                AND NOT EXISTS (SELECT 1 FROM gammes g WHERE g.name = p.gamme AND g.category = p.category)
+                ORDER BY p.gamme
+            '''
+            cursor.execute(query_products, [category])
+            gammes_from_products = [row['gamme'] for row in cursor.fetchall()]
+            
+            # Combiner les deux listes et dédupliquer
+            all_gammes = list(set(gammes_from_table + gammes_from_products))
+            return sorted(all_gammes)
+        else:
+            # Sinon, filtrer uniquement les gammes avec variants complétés (comportement original)
+            query = '''
+                SELECT DISTINCT p.gamme
+                FROM products p
+                INNER JOIN product_variants v ON p.id = v.product_id
+                WHERE p.gamme IS NOT NULL 
+                AND p.gamme != ''
+                AND v.status = 'completed'
+                ORDER BY p.gamme
+            '''
+            params = []
+            cursor.execute(query, params)
+            return [row['gamme'] for row in cursor.fetchall()]
     
     def add_image(self, product_id: int, image_url: str, position: int = None):
         """Ajoute une image à un produit."""
@@ -801,19 +873,79 @@ class GarnierDB:
         ''', (product_id,))
         return [dict(row) for row in cursor.fetchall()]
     
-    def get_completed_products(self, categories: List[str] = None, gamme: str = None) -> List[Dict]:
+    def get_completed_products(self, categories: List[str] = None, gamme: str = None, gammes: List[str] = None, exclude_errors: bool = False) -> List[Dict]:
         """
         Récupère tous les produits avec au moins un variant complété.
         
+        Si des gammes sont spécifiées, utilise la table gamme_products pour récupérer
+        tous les produits liés à ces gammes, même si leurs catégories diffèrent.
+        Cela permet d'exporter tous les produits d'une gamme même si elle appartient
+        à plusieurs catégories.
+        
         Args:
             categories: Liste de catégories à filtrer (None = toutes les catégories)
-            gamme: Nom de la gamme à filtrer (None = toutes les gammes)
+            gamme: Nom de la gamme à filtrer (None = toutes les gammes, pour compatibilité)
+            gammes: Liste de gammes à filtrer (priorité sur gamme si fourni)
+            exclude_errors: Si True, exclut les produits avec status='error'
         
         Returns:
             Liste de dictionnaires contenant les produits
         """
         cursor = self.conn.cursor()
         
+        # Gérer plusieurs gammes (priorité sur gamme)
+        gamme_ids = None
+        if gammes and len(gammes) > 0:
+            # Trouver les IDs de gammes correspondant aux noms fournis
+            # Utiliser LIKE pour matcher même si la gamme dans la DB est malformée
+            gamme_id_conditions = []
+            gamme_id_params = []
+            for g in gammes:
+                gamme_id_conditions.append("g.name LIKE ?")
+                gamme_id_params.append(f"%{g}%")
+            
+            gamme_id_query = f'''
+                SELECT DISTINCT g.id
+                FROM gammes g
+                WHERE {' OR '.join(gamme_id_conditions)}
+            '''
+            cursor.execute(gamme_id_query, gamme_id_params)
+            gamme_ids = [row['id'] for row in cursor.fetchall()]
+            logger.debug(f"Gammes trouvées: {len(gamme_ids)} IDs pour les noms {gammes}")
+        elif gamme:
+            # Trouver l'ID de la gamme correspondant au nom fourni
+            cursor.execute('SELECT id FROM gammes WHERE name LIKE ?', (f"%{gamme}%",))
+            gamme_ids = [row['id'] for row in cursor.fetchall()]
+            logger.debug(f"Gamme trouvée: {len(gamme_ids)} ID(s) pour le nom '{gamme}'")
+        
+        # Si des gammes sont spécifiées, utiliser la table gamme_products
+        if gamme_ids and len(gamme_ids) > 0:
+            # Utiliser gamme_products pour récupérer tous les produits liés à ces gammes
+            # Ne pas filtrer strictement par p.category dans ce cas
+            conditions = ["pv.status = 'completed'"]
+            params = []
+            
+            placeholders = ','.join(['?'] * len(gamme_ids))
+            conditions.append(f"gp.gamme_id IN ({placeholders})")
+            params.extend(gamme_ids)
+            
+            if exclude_errors:
+                conditions.append("p.status != 'error'")
+            
+            where_clause = " AND ".join(conditions)
+            
+            query = f'''
+                SELECT DISTINCT p.*
+                FROM products p
+                JOIN product_variants pv ON p.id = pv.product_id
+                JOIN gamme_products gp ON p.id = gp.product_id
+                WHERE {where_clause}
+                ORDER BY p.product_code
+            '''
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+        
+        # Sinon, utiliser l'ancienne logique (filtrage par p.gamme LIKE)
         conditions = ["pv.status = 'completed'"]
         params = []
         
@@ -822,11 +954,22 @@ class GarnierDB:
             conditions.append(f"p.category IN ({placeholders})")
             params.extend(categories)
         
-        if gamme:
+        # Si gamme/gammes sont fournis mais aucun ID trouvé, utiliser LIKE sur p.gamme
+        if gammes and len(gammes) > 0:
+            # Utiliser OR pour combiner plusieurs gammes avec LIKE
+            gamme_conditions = []
+            for g in gammes:
+                gamme_conditions.append("p.gamme LIKE ?")
+                params.append(f"%{g}%")
+            conditions.append(f"({' OR '.join(gamme_conditions)})")
+        elif gamme:
             # Utiliser LIKE pour matcher même si la gamme dans la DB est malformée
             # Ex: DB = "37412 - TAIE ZIG ZAG CURRYNRPA 18,75 €", paramètre = "ZIG ZAG CURRY"
             conditions.append("p.gamme LIKE ?")
             params.append(f"%{gamme}%")
+        
+        if exclude_errors:
+            conditions.append("p.status != 'error'")
         
         where_clause = " AND ".join(conditions)
         
@@ -906,34 +1049,35 @@ class GarnierDB:
             final_name = name.strip()
         
         # Vérifier si la gamme existe déjà
-        cursor.execute('SELECT id, status, name FROM gammes WHERE url = ?', (url,))
+        cursor.execute('SELECT id, status, name, category FROM gammes WHERE url = ?', (url,))
         existing = cursor.fetchone()
         
         if existing:
             gamme_id = existing['id']
             existing_status = existing['status']
             existing_name = existing['name']
+            existing_category = existing['category']
             
             # Si la gamme était en erreur et qu'on a maintenant un nom, la mettre à jour
             if existing_status == 'error' and final_name:
                 cursor.execute('''
                     UPDATE gammes 
-                    SET name = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    SET name = ?, status = ?, category = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (final_name, 'pending', gamme_id))
+                ''', (final_name, 'pending', category, gamme_id))
                 self.conn.commit()
                 logger.debug(f"Gamme {url} mise à jour (était en erreur, maintenant avec nom)")
                 return gamme_id
             
-            # Si la gamme existe déjà, mettre à jour seulement si nécessaire
-            if existing_name != final_name or existing_status != final_status:
+            # Si la gamme existe déjà, mettre à jour si nécessaire (nom, status, ou catégorie)
+            if existing_name != final_name or existing_status != final_status or existing_category != category:
                 cursor.execute('''
                     UPDATE gammes 
-                    SET name = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    SET name = ?, status = ?, category = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (final_name, final_status, gamme_id))
+                ''', (final_name, final_status, category, gamme_id))
                 self.conn.commit()
-                logger.debug(f"Gamme {url} mise à jour")
+                logger.debug(f"Gamme {url} mise à jour (catégorie: {existing_category} -> {category})")
             
             return gamme_id
         
@@ -1091,8 +1235,10 @@ class GarnierDB:
         Vérifie et met à jour le statut d'une gamme si tous ses produits sont traités.
         
         Logique :
+        - Nettoie d'abord les entrées orphelines dans gamme_products
         - Si tous les produits de la gamme ont au moins 1 variant completed → gamme 'completed'
         - Si tous les produits sont en erreur → gamme 'error'
+        - Si aucune entrée valide et gamme en 'processing' → gamme 'error'
         - Sinon → gamme reste 'pending' ou 'processing'
         
         Args:
@@ -1103,26 +1249,61 @@ class GarnierDB:
         """
         cursor = self.conn.cursor()
         
-        # Récupérer tous les produits de cette gamme via gamme_products
+        # Étape 1 : Nettoyer les entrées orphelines dans gamme_products
+        # (produits qui ont été supprimés mais dont les entrées gamme_products existent encore)
+        cursor.execute('''
+            DELETE FROM gamme_products
+            WHERE gamme_id = ? 
+            AND product_id NOT IN (SELECT id FROM products)
+        ''', (gamme_id,))
+        orphaned_count = cursor.rowcount
+        if orphaned_count > 0:
+            self.conn.commit()
+            logger.debug(f"Gamme {gamme_id}: {orphaned_count} entrée(s) orpheline(s) nettoyée(s)")
+        
+        # Étape 2 : Récupérer la catégorie de la gamme
+        cursor.execute('SELECT category FROM gammes WHERE id = ?', (gamme_id,))
+        gamme_row = cursor.fetchone()
+        gamme_category = gamme_row['category'] if gamme_row else None
+        
+        # Étape 3 : Récupérer tous les produits valides de cette gamme qui appartiennent à la même catégorie
         cursor.execute('''
             SELECT p.id, p.status, p.product_code
             FROM products p
             INNER JOIN gamme_products gp ON p.id = gp.product_id
             WHERE gp.gamme_id = ?
-        ''', (gamme_id,))
+            AND p.category = ?
+        ''', (gamme_id, gamme_category))
         
         products = cursor.fetchall()
         
-        # Si aucun produit lié à cette gamme, ne rien faire
+        # Étape 4 : Déterminer le statut actuel de la gamme
+        current_status = None
+        cursor.execute('SELECT status FROM gammes WHERE id = ?', (gamme_id,))
+        row = cursor.fetchone()
+        if row:
+            current_status = row['status']
+        
+        # Étape 5 : Si aucun produit valide après nettoyage (pour cette catégorie)
         if not products:
-            logger.debug(f"Gamme {gamme_id}: Aucun produit trouvé, statut inchangé")
+            # Si la gamme était en processing, la marquer comme error
+            if current_status == 'processing':
+                cursor.execute('''
+                    UPDATE gammes 
+                    SET status = 'error', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (gamme_id,))
+                self.conn.commit()
+                logger.info(f"✓ Gamme {gamme_id} passée à 'error' (aucun produit valide après nettoyage)")
+                return True
+            # Sinon, ne rien changer
             return False
         
+        # Étape 6 : Analyser les produits existants
         total_products = len(products)
         completed_products = 0
         error_products = 0
         
-        # Pour chaque produit, vérifier s'il a au moins 1 variant completed
         for product in products:
             product_id = product['id']
             product_status = product['status']
@@ -1141,27 +1322,18 @@ class GarnierDB:
             elif product_status == 'error':
                 error_products += 1
         
-        # Déterminer le nouveau statut de la gamme
-        current_status = None
-        cursor.execute('SELECT status FROM gammes WHERE id = ?', (gamme_id,))
-        row = cursor.fetchone()
-        if row:
-            current_status = row['status']
-        
+        # Étape 7 : Déterminer le nouveau statut
         new_status = None
         
-        # Si tous les produits ont au moins 1 variant completed → gamme completed
         if completed_products == total_products:
             new_status = 'completed'
-        # Si tous les produits sont en erreur → gamme error
         elif error_products == total_products:
             new_status = 'error'
         # Sinon, garder pending ou processing (ne pas changer si déjà processing)
         else:
-            # Pas de changement, la gamme est encore en cours
             return False
         
-        # Mettre à jour seulement si le statut a changé
+        # Étape 8 : Mettre à jour seulement si le statut a changé
         if new_status and new_status != current_status:
             cursor.execute('''
                 UPDATE gammes 

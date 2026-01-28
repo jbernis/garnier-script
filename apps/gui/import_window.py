@@ -1137,6 +1137,46 @@ class ImportWindow(ctk.CTkToplevel):
         # Ouvrir la fenêtre de progression
         self.progress_window = ProgressWindow(self, f"Import {self.selected_scraper.get_display_name()}")
         
+        # Vérifier les erreurs dans la base de données et afficher une notification si nécessaire
+        def check_errors():
+            try:
+                from utils.app_config import get_supplier_db_path
+                from utils.garnier_db import GarnierDB
+                from utils.artiga_db import ArtigaDB
+                from utils.cristel_db import CristelDB
+                
+                supplier_name = self.selected_scraper.name.lower()
+                db_path = get_supplier_db_path(supplier_name)
+                
+                # Choisir la classe DB appropriée
+                if supplier_name == 'garnier':
+                    db_class = GarnierDB
+                elif supplier_name == 'artiga':
+                    db_class = ArtigaDB
+                elif supplier_name == 'cristel':
+                    db_class = CristelDB
+                else:
+                    return
+                
+                db = db_class(db_path)
+                
+                # Compter les produits en erreur
+                cursor = db.conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM products WHERE status = 'error'")
+                error_count = cursor.fetchone()[0]
+                db.close()
+                
+                # Afficher la notification si des erreurs sont présentes
+                if error_count > 0 and self.progress_window:
+                    self.progress_window.after(0, lambda: self.progress_window.show_diagnostic_notification(error_count))
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).debug(f"Impossible de vérifier les erreurs: {e}")
+        
+        # Vérifier les erreurs dans un thread pour ne pas bloquer
+        import threading
+        threading.Thread(target=check_errors, daemon=True).start()
+        
         # Démarrer le scraping dans un thread
         def scrape_thread():
             def progress_callback(message, current, total):

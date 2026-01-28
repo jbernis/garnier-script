@@ -128,7 +128,7 @@ def process_variant(variant_id, code_vl, url, db, driver, session, headless=True
             
             # Attendre que l'URL spécifique du variant soit accessible avant de continuer (vérifie toutes les 30s jusqu'à obtenir 200)
             logger.info(f"Vérification de l'accessibilité de l'URL du variant: {url}")
-            if wait_for_url_accessible(session, url, check_interval=30, timeout=300):  # 5 minutes
+            if wait_for_url_accessible(session, url, check_interval=30, timeout=10, max_wait_time=120):  # 2 minutes
                 logger.info(f"URL du variant accessible (code 200 détecté), ré-authentification avant reprise...")
                 
                 # Ré-authentifier avant de reprendre l'extraction (2ème retry)
@@ -224,7 +224,7 @@ def process_variant(variant_id, code_vl, url, db, driver, session, headless=True
 
 
 def process_urls(code_vl=None, status='pending', limit=None, retry_errors=False,
-                output_db='garnier_products.db', headless=True, category=None, gamme=None):
+                output_db='garnier_products.db', headless=True, category=None, categories=None, gamme=None):
     """
     Traite les URLs depuis la base de données.
     
@@ -235,7 +235,8 @@ def process_urls(code_vl=None, status='pending', limit=None, retry_errors=False,
         retry_errors: Réessayer les URLs en erreur
         output_db: Chemin vers la base de données
         headless: Mode headless pour Selenium
-        category: Filtrer par catégorie (optionnel)
+        category: Filtrer par catégorie (une seule, pour compatibilité)
+        categories: Filtrer par catégories (liste, prioritaire sur category)
         gamme: Filtrer par gamme (optionnel)
     """
     db = GarnierDB(output_db)
@@ -266,17 +267,21 @@ def process_urls(code_vl=None, status='pending', limit=None, retry_errors=False,
         else:
             # Filtrer par catégorie/gamme si spécifié
             if status == 'pending':
-                variants = db.get_pending_variants(limit=limit, category=category, gamme=gamme)
+                variants = db.get_pending_variants(limit=limit, category=category, categories=categories, gamme=gamme)
             else:
-                variants = db.get_error_variants(limit=limit, category=category, gamme=gamme)
+                variants = db.get_error_variants(limit=limit, category=category, categories=categories, gamme=gamme)
             
             # Logger les filtres appliqués
-            if category or gamme:
+            if categories or category or gamme:
                 filter_msg = "Filtrage appliqué: "
-                if category:
-                    filter_msg += f"catégorie={category} "
+                if categories and len(categories) > 0:
+                    filter_msg += f"catégories: {', '.join(categories)}"
+                elif category:
+                    filter_msg += f"catégorie: {category}"
                 if gamme:
-                    filter_msg += f"gamme={gamme}"
+                    if filter_msg != "Filtrage appliqué: ":
+                        filter_msg += ", "
+                    filter_msg += f"gamme: {gamme}"
                 logger.info(filter_msg)
         
         if not variants:
@@ -416,7 +421,8 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--category', '-c',
-        help='Filtrer par catégorie (optionnel)'
+        action='append',
+        help='Filtrer par catégorie(s) (peut être répété plusieurs fois)'
     )
     parser.add_argument(
         '--gamme', '-g',
@@ -432,7 +438,8 @@ if __name__ == '__main__':
         retry_errors=args.retry_errors,
         output_db=args.db,
         headless=not args.no_headless,
-        category=args.category,
+        category=args.category[0] if args.category and len(args.category) == 1 else None,
+        categories=args.category if args.category and len(args.category) > 1 else None,
         gamme=args.gamme
     )
 

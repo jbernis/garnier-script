@@ -29,7 +29,16 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 logger = logging.getLogger(__name__)
 
 # Charger les variables d'environnement depuis .env
-load_dotenv()
+import sys
+from pathlib import Path
+
+if getattr(sys, "frozen", False):
+    # Mode packagé : chercher dans Application Support
+    env_path = Path.home() / "Library" / "Application Support" / "ScrapersShopify" / ".env"
+    load_dotenv(env_path)
+else:
+    # Mode développement : chercher dans le répertoire courant
+    load_dotenv()
 
 # Configuration
 BASE_URL = os.getenv("BASE_URL_GARNIER", "https://garnier-thiebaut.adsi.me")
@@ -40,11 +49,8 @@ PASSWORD = os.getenv("PASSWORD", "")
 OUTPUT_DIR = os.getenv("GARNIER_OUTPUT_DIR", "outputs/garnier")
 OUTPUT_CSV = os.getenv("OUTPUT_CSV_GARNIER", "shopify_import_garnier.csv")
 
-# Vérifier que les credentials sont définis
-if not USERNAME or not PASSWORD:
-    logger.error("Les credentials USERNAME et PASSWORD doivent être définis dans le fichier .env")
-    logger.error("Veuillez créer un fichier .env basé sur .env.example")
-    raise ValueError("Credentials manquants dans .env")
+# Note: La vérification des credentials est maintenant faite dans la fonction authenticate()
+# pour éviter de bloquer l'import du module en mode packagé
 
 # Headers pour simuler un navigateur
 HEADERS = {
@@ -122,6 +128,12 @@ def authenticate(headless: bool = True) -> tuple:
     Authentifie l'utilisateur sur le site.
     Retourne un tuple (driver, session) où driver peut être None si Selenium n'est pas disponible.
     """
+    # Vérifier que les credentials sont définis
+    if not USERNAME or not PASSWORD:
+        logger.error("Les credentials USERNAME et PASSWORD doivent être définis dans le fichier .env")
+        logger.error("Veuillez créer un fichier .env dans ~/Library/Application Support/ScrapersShopify/")
+        raise ValueError("Credentials manquants dans .env")
+    
     logger.info("Authentification en cours...")
     
     # Essayer d'abord avec Selenium pour gérer le JavaScript

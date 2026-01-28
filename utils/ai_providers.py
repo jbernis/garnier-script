@@ -355,31 +355,44 @@ class OpenAIProvider(AIProvider):
                 
                 # Vérifier si l'IA veut utiliser un tool (faire une recherche)
                 if message.tool_calls:
-                    logger.info("🔍 L'IA a décidé de faire une recherche Internet")
+                    logger.info(f"🔍 L'IA a décidé de faire une recherche Internet ({len(message.tool_calls)} appel(s))")
                     
-                    tool_call = message.tool_calls[0]
-                    function_args = json.loads(tool_call.function.arguments)
-                    query = function_args.get("query", "")
-                    
-                    logger.info(f"🔎 Requête de recherche: '{query}'")
-                    
-                    # Exécuter la recherche via Perplexity
-                    logger.info("⏳ Interrogation de Perplexity en cours...")
-                    search_results = self.search_tool.search(query)
-                    logger.info(f"✅ Résultats de recherche reçus ({len(search_results)} caractères)")
-                    logger.debug(f"Résultats Perplexity: {search_results[:500]}...")
-                    
-                    # Ajouter le message de l'IA et les résultats de recherche à la conversation
+                    # Ajouter le message de l'IA avec tous les tool_calls
                     messages.append({
                         "role": "assistant",
                         "content": None,
-                        "tool_calls": message.tool_calls
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                }
+                            }
+                            for tc in message.tool_calls
+                        ]
                     })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": search_results
-                    })
+                    
+                    # Traiter chaque tool_call et ajouter les réponses
+                    for tool_call in message.tool_calls:
+                        function_args = json.loads(tool_call.function.arguments)
+                        query = function_args.get("query", "")
+                        
+                        logger.info(f"🔎 Requête de recherche #{message.tool_calls.index(tool_call) + 1}: '{query}'")
+                        
+                        # Exécuter la recherche via Perplexity
+                        logger.info("⏳ Interrogation de Perplexity en cours...")
+                        search_results = self.search_tool.search(query)
+                        logger.info(f"✅ Résultats de recherche reçus ({len(search_results)} caractères)")
+                        logger.debug(f"Résultats Perplexity: {search_results[:500]}...")
+                        
+                        # Ajouter la réponse du tool pour ce tool_call_id
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": search_results
+                        })
                     
                     # Deuxième appel avec les résultats de recherche
                     params["messages"] = messages
@@ -533,42 +546,53 @@ class ClaudeProvider(AIProvider):
         max_retries = processing_config.get("max_retries", 3)
         retry_delay = processing_config.get("retry_delay", 2.0)
         
-        for attempt in range(max_retries):
-            try:
-                client = self.client.Anthropic(api_key=self.api_key)
+        # ÉTAPE 1: Construire les paramètres et faire le premier appel (HORS de la boucle retry)
+        try:
+            client = self.client.Anthropic(api_key=self.api_key)
+            
+            # Construire les paramètres de base
+            params = {
+                "model": self.model,
+                "max_tokens": max_tokens or 3000,
+                "temperature": 0.7,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"Tu es un expert en e-commerce et SEO. Tu génères du contenu optimisé pour les produits en ligne.\n\n{full_prompt}"
+                    }
+                ]
+            }
+            
+            # Ajouter les tools si la recherche est activée
+            if self.enable_search and self.search_tool:
+                params["tools"] = [self.search_tool.get_tool_definition_claude()]
+                logger.info("🌐 Recherche Internet ACTIVÉE - Tool Perplexity disponible pour Claude")
+            else:
+                logger.info("🔒 Recherche Internet DÉSACTIVÉE - Claude utilisera uniquement les données fournies")
+            
+            # Premier appel à l'IA
+            message = client.messages.create(**params)
+            
+            # Vérifier si Claude veut utiliser un tool (faire une recherche)
+            if message.stop_reason == "tool_use":
+                # Extraire tous les tool calls
+                tool_use_blocks = [block for block in message.content if block.type == "tool_use"]
+                logger.info(f"🔍 Claude a décidé de faire une recherche Internet ({len(tool_use_blocks)} appel(s))")
                 
-                # Construire les paramètres de base
-                params = {
-                    "model": self.model,
-                    "max_tokens": max_tokens or 3000,
-                    "temperature": 0.7,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": f"Tu es un expert en e-commerce et SEO. Tu génères du contenu optimisé pour les produits en ligne.\n\n{full_prompt}"
-                        }
-                    ]
-                }
-                
-                # Ajouter les tools si la recherche est activée
-                if self.enable_search and self.search_tool:
-                    params["tools"] = [self.search_tool.get_tool_definition_claude()]
-                    logger.info("🌐 Recherche Internet ACTIVÉE - Tool Perplexity disponible pour Claude")
-                else:
-                    logger.info("🔒 Recherche Internet DÉSACTIVÉE - Claude utilisera uniquement les données fournies")
-                
-                # Premier appel à l'IA
-                message = client.messages.create(**params)
-                
-                # Vérifier si Claude veut utiliser un tool (faire une recherche)
-                if message.stop_reason == "tool_use":
-                    logger.info("🔍 Claude a décidé de faire une recherche Internet")
+                if tool_use_blocks:
+                    import json
                     
-                    # Extraire le tool call
-                    tool_use_block = next((block for block in message.content if block.type == "tool_use"), None)
-                    if tool_use_block:
+                    # Construire le message assistant avec tous les tool_use
+                    assistant_content = []
+                    tool_results = []
+                    
+                    for tool_use_block in tool_use_blocks:
+                        # S'assurer que l'ID est un string pur
+                        tool_id = str(tool_use_block.id)
+                        logger.debug(f"Tool use block ID: {tool_id} (type: {type(tool_use_block.id)})")
+                        
                         query = tool_use_block.input.get("query", "")
-                        logger.info(f"🔎 Requête de recherche: '{query}'")
+                        logger.info(f"🔎 Requête de recherche #{tool_use_blocks.index(tool_use_block) + 1}: '{query}'")
                         
                         # Exécuter la recherche via Perplexity
                         logger.info("⏳ Interrogation de Perplexity en cours...")
@@ -576,35 +600,65 @@ class ClaudeProvider(AIProvider):
                         logger.info(f"✅ Résultats de recherche reçus ({len(search_results)} caractères)")
                         logger.debug(f"Résultats Perplexity: {search_results[:500]}...")
                         
-                        # Ajouter le résultat du tool à la conversation
-                        params["messages"].append({
-                            "role": "assistant",
-                            "content": message.content
-                        })
-                        params["messages"].append({
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_use_block.id,
-                                    "content": search_results
-                                }
-                            ]
+                        # Ajouter le tool_use au message assistant
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": str(tool_id),
+                            "name": "search_web",
+                            "input": {"query": query}
                         })
                         
-                        # Retirer les tools pour la réponse finale
-                        if "tools" in params:
-                            del params["tools"]
-                        
-                        final_response = client.messages.create(**params)
-                        logger.info("✅ Réponse finale générée avec les résultats de recherche")
-                        return final_response.content[0].text.strip()
+                        # Ajouter le tool_result
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": str(tool_id),
+                            "content": str(search_results)
+                        })
                     
-                # Pas de recherche nécessaire, retourner directement la réponse
-                else:
-                    if self.enable_search and self.search_tool:
-                        logger.info("ℹ️  Claude n'a pas jugé nécessaire de faire une recherche (données suffisantes)")
-                    return message.content[0].text.strip()
+                    # Construire le message assistant avec tous les tool_use
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": assistant_content
+                    }
+                    
+                    # Construire le message user avec tous les tool_result
+                    user_msg = {
+                        "role": "user",
+                        "content": tool_results
+                    }
+                    
+                    # Sérialiser/désérialiser pour garantir JSON pur
+                    assistant_msg = json.loads(json.dumps(assistant_msg))
+                    user_msg = json.loads(json.dumps(user_msg))
+                    
+                    params["messages"].append(assistant_msg)
+                    params["messages"].append(user_msg)
+                    
+                    logger.debug(f"✅ Messages tool ajoutés ({len(tool_use_blocks)} tool_call(s))")
+                    logger.debug(f"Structure: {len(params['messages'])} messages total")
+                    
+                    # Retirer les tools pour la réponse finale
+                    if "tools" in params:
+                        del params["tools"]
+            
+            # Pas de recherche nécessaire
+            else:
+                if self.enable_search and self.search_tool:
+                    logger.info("ℹ️  Claude n'a pas jugé nécessaire de faire une recherche (données suffisantes)")
+                # Retourner directement la réponse
+                return message.content[0].text.strip()
+        
+        except Exception as e:
+            # Si erreur pendant le premier appel ou la recherche, propager l'erreur
+            logger.error(f"Erreur lors de la préparation de la requête Claude: {e}")
+            raise
+        
+        # ÉTAPE 2: Appeler Claude pour la réponse finale (AVEC retry)
+        for attempt in range(max_retries):
+            try:
+                final_response = client.messages.create(**params)
+                logger.info("✅ Réponse finale générée avec les résultats de recherche")
+                return final_response.content[0].text.strip()
             
             except Exception as e:
                 error_msg = str(e)

@@ -70,6 +70,19 @@ pyinstaller creation-build/build.spec --clean
 
 L'application sera créée dans `dist/ScrapersShopify.app` (à la racine du projet)
 
+**Important:** Après le build, lancez le script post-build pour copier l'icône personnalisée :
+
+```bash
+./creation-build/post_build.sh
+```
+
+Ou depuis la racine du projet :
+
+```bash
+cd /Users/jean-loup/shopify/garnier
+./creation-build/post_build.sh
+```
+
 ### 5. Tester l'application (optionnel)
 
 Avant de créer le DMG, vous pouvez tester l'application :

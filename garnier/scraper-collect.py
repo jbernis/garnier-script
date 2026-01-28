@@ -800,6 +800,12 @@ def collect_urls(categories=None, output_db='garnier_products.db', headless=True
                 gamme_name = gamme.get('name')  # Peut être None
                 gamme_url = gamme.get('url')
                 gamme_status = gamme.get('status')
+                gamme_category = gamme.get('category')
+                
+                # Vérifier que la gamme appartient bien à la catégorie en cours de traitement
+                if gamme_category != category_name:
+                    logger.warning(f"Gamme {gamme_id} ({gamme_name}) appartient à la catégorie '{gamme_category}' mais on traite '{category_name}', ignorée")
+                    continue
                 
                 # Marquer la gamme comme en cours de traitement
                 if gamme_status != 'error':  # Ne pas traiter les gammes en erreur (sans nom)

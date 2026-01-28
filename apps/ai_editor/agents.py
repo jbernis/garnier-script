@@ -358,6 +358,7 @@ class GoogleShoppingAgent(BaseAIAgent):
     def _get_taxonomy_sample(self, product_data: Dict[str, Any]) -> str:
         """
         Récupère un échantillon pertinent de catégories de la taxonomie.
+        IMPORTANT: Les catégories retournées sont les SEULES options valides.
         
         Args:
             product_data: Données du produit
@@ -368,47 +369,17 @@ class GoogleShoppingAgent(BaseAIAgent):
         if not self.db:
             return ""
         
-        # Mots-clés extraits du produit pour filtrer les catégories
-        keywords = []
-        
-        # Extraire des mots-clés du titre, type, tags
-        if 'Title' in product_data:
-            keywords.extend(product_data['Title'].lower().split()[:5])
-        if 'Type' in product_data:
-            keywords.extend(product_data['Type'].lower().split()[:3])
-        if 'Tags' in product_data:
-            tags = product_data['Tags'].split(',')[:3]
-            keywords.extend([t.strip().lower() for t in tags])
-        
-        # Nettoyer les mots-clés (enlever mots courts)
-        keywords = [k for k in keywords if len(k) > 3][:5]
-        
-        if not keywords:
-            return ""
-        
-        # Rechercher des catégories contenant ces mots-clés
         try:
-            cursor = self.db.conn.cursor()
+            # Utiliser la nouvelle méthode pour obtenir les catégories candidates
+            # Réduit à 15 pour optimiser la vitesse (au lieu de 25)
+            candidates = self.db.get_candidate_categories(product_data, max_results=15)
             
-            # Construire la requête avec LIKE pour chaque mot-clé
-            query = "SELECT code, path FROM google_taxonomy WHERE "
-            conditions = []
-            params = []
-            
-            for keyword in keywords:
-                conditions.append("LOWER(path) LIKE ?")
-                params.append(f'%{keyword}%')
-            
-            query += " OR ".join(conditions)
-            query += " LIMIT 10"
-            
-            cursor.execute(query, params)
-            results = cursor.fetchall()
-            
-            if results:
-                taxonomy_text = "\n\n📚 CATÉGORIES PERTINENTES DISPONIBLES:\n"
-                for code, path in results:
-                    taxonomy_text += f"  - {path}\n"
+            if candidates:
+                taxonomy_text = "\n\n📚 CATÉGORIES VALIDES (CHOISIS UNIQUEMENT PARMI CETTE LISTE):\n"
+                for i, (code, path) in enumerate(candidates, 1):
+                    taxonomy_text += f"  {i}. {path}\n"
+                
+                taxonomy_text += "\n⚠️ IMPORTANT: Tu DOIS choisir UNE catégorie de cette liste. N'invente PAS de nouvelle catégorie!"
                 return taxonomy_text
             
         except Exception as e:
@@ -434,7 +405,10 @@ class GoogleShoppingAgent(BaseAIAgent):
         
         if taxonomy_sample:
             base_prompt += taxonomy_sample
-            base_prompt += "\n💡 Choisis une catégorie parmi celles ci-dessus ou une catégorie similaire.\n"
+            base_prompt += "\n\n⚠️ RÈGLE ABSOLUE: Tu DOIS choisir UNIQUEMENT une catégorie de la liste ci-dessus.\n"
+            base_prompt += "N'invente JAMAIS de nouvelle catégorie. Si aucune ne correspond parfaitement, choisis la plus proche.\n"
+        else:
+            base_prompt += "\n\n⚠️ ATTENTION: Aucune catégorie candidate trouvée. Choisis une catégorie générale valide.\n"
         
         return base_prompt
     
@@ -506,7 +480,7 @@ CONTENU:
 class SEOAgent(BaseAIAgent):
     """Agent pour optimiser tous les champs SEO Shopify."""
     
-    def generate(self, product_data: Dict[str, Any], **kwargs) -> Dict[str, str]:
+    def generate(self, product_data: Dict[str, Any], **kwargs) -> Dict[str, Any]:
         """
         Génère tous les champs SEO pour le produit.
         
@@ -514,13 +488,16 @@ class SEOAgent(BaseAIAgent):
             product_data: Données du produit
             
         Returns:
-            Dict avec 6 clés :
+            Dict avec 7 clés :
             - seo_title: SEO Title
             - seo_description: SEO Description
             - title: Title
             - body_html: Body (HTML)
             - tags: Tags
             - image_alt_text: Image Alt Text
+            - type: Type de produit en MAJUSCULES, PLURIEL, SANS ACCENTS (ex: "NAPPES", "TORCHONS", "PLAIDS")
+            
+        Note: Le champ 'type' est utilisé à la fois pour le CSV Shopify ET pour la concordance interne (csv_type).
         """
         prompt = self._build_full_prompt(product_data)
         
@@ -540,7 +517,7 @@ class SEOAgent(BaseAIAgent):
             # LOG: Afficher la réponse brute pour déboguer
             logger.info(f"📝 Réponse brute de l'agent SEO pour {product_data.get('Handle', 'unknown')}:")
             logger.info(f"--- DÉBUT RÉPONSE ---")
-            logger.info(response)
+            logger.info(response[:1000] + ("..." if len(response) > 1000 else ""))
             logger.info(f"--- FIN RÉPONSE ---")
             
             # Nettoyer les backticks markdown si présents
@@ -574,7 +551,8 @@ class SEOAgent(BaseAIAgent):
                         'title': result.get('title', ''),
                         'body_html': result.get('body_html', ''),
                         'tags': result.get('tags', ''),
-                        'image_alt_text': result.get('image_alt_text', '')
+                        'image_alt_text': result.get('image_alt_text', ''),
+                        'type': result.get('type', '')
                     }
             except json.JSONDecodeError:
                 pass
@@ -587,7 +565,8 @@ class SEOAgent(BaseAIAgent):
                 'title': '',
                 'body_html': '',
                 'tags': '',
-                'image_alt_text': ''
+                'image_alt_text': '',
+                'type': ''
             }
             
             current_field = None
@@ -600,7 +579,8 @@ class SEOAgent(BaseAIAgent):
                 'Body HTML:': 'body_html',
                 'Body (HTML):': 'body_html',
                 'Tags:': 'tags',
-                'Image Alt Text:': 'image_alt_text'
+                'Image Alt Text:': 'image_alt_text',
+                'Type:': 'type'
             }
             
             for line in lines:
@@ -644,7 +624,12 @@ class SEOAgent(BaseAIAgent):
                 result['title'] = product_data.get('Title', '')
                 result['image_alt_text'] = product_data.get('Title', '')
             
-            logger.debug(f"SEO généré pour {product_data.get('Handle', 'unknown')}")
+            # LOG: Afficher les champs extraits incluant csv_type
+            logger.info(f"✅ SEO généré pour {product_data.get('Handle', 'unknown')}:")
+            logger.info(f"  • csv_type: {result.get('csv_type', 'N/A')}")
+            logger.info(f"  • csv_type_confidence: {result.get('csv_type_confidence', 0.0):.2f}")
+            logger.debug(f"  • seo_title: {result.get('seo_title', '')[:50]}...")
+            
             return result
             
         except Exception as e:
@@ -666,7 +651,18 @@ RETOURNE un JSON valide avec ce format EXACT:
       "title": "Titre Shopify du produit",
       "body_html": "<p>Description HTML complète et riche</p>",
       "tags": "tag1, tag2, tag3",
-      "image_alt_text": "Description de l'image pour SEO"
+      "image_alt_text": "Description de l'image pour SEO",
+      "type": "NAPPES"
+    }},
+    {{
+      "handle": "exemple-torchon",
+      "seo_title": "...",
+      "seo_description": "...",
+      "title": "Torchon Éponge Bio",
+      "body_html": "...",
+      "tags": "...",
+      "image_alt_text": "...",
+      "type": "TORCHONS"
     }},
     ... (pour TOUS les {len(products_data)} produits)
   ]
@@ -681,11 +677,26 @@ RÈGLES JSON STRICTES:
 - Pour le HTML dans body_html, mets tout sur une seule ligne ou utilise des \\n
 - Retourne UNIQUEMENT le JSON, sans texte avant ou après
 
+INSTRUCTIONS CSV_TYPE (TRÈS IMPORTANT):
+- Le csv_type doit être déterminé en analysant UNIQUEMENT le Title (nom du produit)
+- IGNORE complètement le champ Type original qui peut être générique (ex: "Accessoire", "Linge de table")
+- Analyse sémantiquement le Title pour identifier la vraie nature du produit
+- Exemples de transformation:
+  * Title: "Nappe en Coton Jacquard" → csv_type: "NAPPES"
+  * Title: "Torchon Éponge Absorbant" → csv_type: "TORCHONS"
+  * Title: "Plaid Laine Mérinos" → csv_type: "COUVERTURES"
+  * Title: "Serviette de Table Lin" → csv_type: "SERVIETTES"
+  * Title: "Chemin de Table Festif" → csv_type: "CHEMINS DE TABLE"
+- Utilise toujours le PLURIEL et les MAJUSCULES
+- Si incertain, mets une confiance plus faible (0.6-0.7) mais propose quand même un csv_type
+
 CONTENU:
 ⚠️ OBLIGATOIRE: Tu DOIS retourner EXACTEMENT {len(products_data)} produits dans le tableau "products"
 - Liste des handles à retourner: {', '.join(handles[:5])}{'...' if len(handles) > 5 else ''}
 - Compte de produits attendus: {len(products_data)}
-- Chaque produit DOIT avoir les 6 champs: seo_title, seo_description, title, body_html, tags, image_alt_text
+- Chaque produit DOIT avoir les 7 champs: seo_title, seo_description, title, body_html, tags, image_alt_text, type
+- type: Type de produit au PLURIEL, en MAJUSCULES, SANS ACCENTS (ex: "NAPPES", "TORCHONS", "PLAIDS", "SERVIETTES DE TABLE", "CHEMINS DE TABLE")
+- IMPORTANT: Analyser sémantiquement le Title (nom du produit) pour déterminer le type (ex: "Nappe Coton" → "NAPPES", "Torchon Éponge" → "TORCHONS")
 - Si des données manquent, génère quand même du contenu de qualité basé sur ce qui est disponible
 - NE SAUTE AUCUN PRODUIT, même si les données sont limitées
 
@@ -836,6 +847,17 @@ Pour le champ Tags:
 - OBLIGATOIRE: Générer au moins 5-10 tags pertinents séparés par des virgules
 - Inclure la catégorie, la marque, les caractéristiques principales
 - NE JAMAIS laisser ce champ vide
+
+"""
+        
+        if 'type' in validation_result['issues']:
+            retry_instructions += """
+Pour le champ Type:
+- OBLIGATOIRE: Générer un type de produit en MAJUSCULES, PLURIEL, SANS ACCENTS
+- Minimum 3 caractères
+- Exemples: NAPPES, TORCHONS, SERVIETTES, COUSSINS
+- NE JAMAIS laisser ce champ vide
+- Le type doit être déterminé à partir du Title du produit
 
 """
         

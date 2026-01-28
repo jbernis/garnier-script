@@ -108,11 +108,22 @@ class BaseScraper(ABC):
         """
         Retourne le répertoire de sortie automatique basé sur le nom du fournisseur.
         Format: outputs/{nom_du_fournisseur}
+        En mode packagé, utilise ~/Library/Application Support/ScrapersShopify/outputs
         
         Returns:
             Chemin du répertoire de sortie (ex: "outputs/garnier")
         """
         import os
-        output_dir = os.path.join("outputs", self.name)
-        return output_dir
+        import sys
+        from pathlib import Path
+        
+        if getattr(sys, "frozen", False):
+            # Mode packagé : utiliser Application Support
+            base_dir = Path.home() / "Library" / "Application Support" / "ScrapersShopify" / "outputs"
+            output_dir = base_dir / self.name
+            return str(output_dir)
+        else:
+            # Mode développement : utiliser le répertoire courant
+            output_dir = os.path.join("outputs", self.name)
+            return output_dir
 

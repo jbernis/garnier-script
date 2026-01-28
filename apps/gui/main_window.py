@@ -6,6 +6,7 @@ import customtkinter as ctk
 from typing import Optional
 import sys
 import os
+import logging
 
 # Ajouter le répertoire parent au path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +16,11 @@ from apps.gui.config_window import ConfigWindow
 from apps.gui.import_window import ImportWindow
 from apps.gui.csv_config_window import CSVConfigWindow
 from apps.gui.cleanup_window import CleanupWindow
+from apps.gui.taxonomy_window import TaxonomyWindow
+from apps.gui.errors_viewer_window import ErrorsViewerWindow
+from apps.gui.imports_manager_window import ImportsManagerWindow
+from apps.gui.csv_comparison_window import CSVComparisonWindow
+from apps.gui.help_window import HelpWindow
 from apps.ai_editor.gui.window import AIEditorWindow
 from utils.setup_checker import SetupChecker
 from utils.cleanup import remove_outputs_directory
@@ -37,6 +43,9 @@ class MainWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
         
+        # Initialiser les bases de données (copier depuis le bundle si nécessaire)
+        self.init_databases()
+        
         self.title("Scrapers Shopify - Interface Graphique")
         self.geometry("1000x700")
         self.resizable(True, True)
@@ -47,10 +56,15 @@ class MainWindow(ctk.CTk):
         
         # Variables pour les fenêtres ouvertes
         self.setup_window: Optional[SetupWindow] = None
+        self.help_window: Optional[HelpWindow] = None
         self.config_window: Optional[ConfigWindow] = None
         self.csv_config_window: Optional[CSVConfigWindow] = None
         self.import_window: Optional[ImportWindow] = None
         self.cleanup_window: Optional[CleanupWindow] = None
+        self.taxonomy_window: Optional[TaxonomyWindow] = None
+        self.errors_viewer_window: Optional[ErrorsViewerWindow] = None
+        self.imports_manager_window: Optional[ImportsManagerWindow] = None
+        self.csv_comparison_window: Optional[CSVComparisonWindow] = None
         self.viewer_window: Optional[ViewerWindow] = None
         self.ai_editor_window: Optional[AIEditorWindow] = None
         self.csv_generator_window = None
@@ -83,6 +97,57 @@ class MainWindow(ctk.CTk):
         
         # Configurer le handler de fermeture pour nettoyer les fichiers générés
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Gérer la réactivation de l'app sur macOS (clic sur l'icône du Dock)
+        self.bind("<FocusIn>", lambda e: self.on_app_focus())
+        self.bind("<Map>", lambda e: self.on_app_focus())
+    
+    def init_databases(self):
+        """Copie les bases de données depuis le bundle vers Application Support si nécessaire."""
+        if not getattr(sys, "frozen", False):
+            return  # En mode développement, pas besoin de copier
+        
+        import shutil
+        from pathlib import Path
+        
+        # Répertoire de destination
+        app_support = Path.home() / "Library" / "Application Support" / "ScrapersShopify"
+        db_dir = app_support / "database"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Répertoire source (dans le bundle)
+        bundle_db_dir = Path(sys._MEIPASS) / "database"
+        
+        if not bundle_db_dir.exists():
+            return  # Pas de bases dans le bundle
+        
+        # Copier chaque base si elle n'existe pas déjà
+        db_files = ["garnier_products.db", "artiga_products.db", "cristel_products.db", "ai_prompts.db"]
+        for db_file in db_files:
+            source = bundle_db_dir / db_file
+            dest = db_dir / db_file
+            
+            if source.exists() and not dest.exists():
+                try:
+                    shutil.copy2(source, dest)
+                    logging.info(f"Base de données copiée: {db_file}")
+                except Exception as e:
+                    logging.warning(f"Erreur lors de la copie de {db_file}: {e}")
+    
+    def on_app_focus(self):
+        """Appelé quand l'app reçoit le focus (clic sur l'icône du Dock)."""
+        # Amener toutes les fenêtres de l'app au premier plan
+        self.lift()
+        self.focus_force()
+        
+        # Amener aussi les fenêtres secondaires au premier plan si elles existent
+        for window in [self.config_window, self.csv_config_window, self.import_window, 
+                      self.viewer_window, self.ai_editor_window, self.csv_generator_window]:
+            if window and window.winfo_exists():
+                try:
+                    window.lift()
+                except:
+                    pass
     
     def bring_to_front(self):
         """Amène la fenêtre au premier plan."""
@@ -144,12 +209,16 @@ class MainWindow(ctk.CTk):
         nav_buttons = [
             ("🏠 Accueil", self.show_home),
             ("📝 Configuration CSV", self.open_csv_config),
+            ("📊 Taxonomie", self.open_taxonomy),
+            ("📂 Gestion Imports", self.open_imports_manager),
             ("⚙️ Configuration", self.open_config),
             ("🗑️ Nettoyage BDD", self.open_cleanup),
+            ("🔍 Erreurs Scraping", self.open_errors_viewer),
+            ("📚 Aide", self.open_help),
             ("ℹ️ À propos", self.show_about),
         ]
         if not getattr(sys, "frozen", False):
-            nav_buttons.insert(3, ("🔧 Setup", self.open_setup))
+            nav_buttons.insert(4, ("🔧 Setup", self.open_setup))
         
         self.nav_buttons = {}
         for text, command in nav_buttons:
@@ -276,12 +345,11 @@ class MainWindow(ctk.CTk):
             
             return card_frame
         
-        # Créer les cartes dans la zone centrale - organisées par lignes (2 cartes max par ligne)
-        # Première ligne : Import et Générateur CSV
-        first_row_cards = []
+        # Créer les cartes dans la zone centrale - 2 cartes max par ligne
+        cards = []
         
         # Card Import
-        first_row_cards.append({
+        cards.append({
             'title': "📥 Import",
             'description': "Importez des produits depuis les fournisseurs configurés",
             'button_text': "Ouvrir",
@@ -291,50 +359,8 @@ class MainWindow(ctk.CTk):
             'enabled': True
         })
         
-        # Card Générateur CSV
-        first_row_cards.append({
-            'title': "📄 Générateur CSV",
-            'description': "Générez des CSV Shopify personnalisés en sélectionnant les champs et catégories",
-            'button_text': "Ouvrir",
-            'command': self.open_csv_generator,
-            'button_color': "orange",
-            'button_hover': "darkorange",
-            'enabled': True
-        })
-        
-        # Créer la première rangée de cartes
-        first_row_frame = ctk.CTkFrame(cards_wrapper)
-        first_row_frame.pack(pady=10, fill="x", anchor="w")
-        
-        for card_info in first_row_cards:
-            create_card(
-                first_row_frame,
-                card_info['title'],
-                card_info['description'],
-                card_info['button_text'],
-                card_info['command'],
-                card_info.get('button_color'),
-                card_info.get('button_hover'),
-                card_info.get('enabled', True)
-            )
-        
-        # Deuxième ligne : Visualiseur CSV et Éditeur IA
-        second_row_cards = []
-        
-        # Card Visualiseur CSV (si disponible)
-        if VIEWER_AVAILABLE:
-            second_row_cards.append({
-                'title': "📋 Visualiseur CSV",
-                'description': "Visualisez et sélectionnez des produits depuis un CSV Shopify",
-                'button_text': "Ouvrir",
-                'command': self.open_viewer,
-                'button_color': ["#3B8ED0", "#1F6AA5"],
-                'button_hover': ["#36719F", "#144870"],
-                'enabled': True
-            })
-        
         # Card Éditeur IA
-        second_row_cards.append({
+        cards.append({
             'title': "🤖 Éditeur IA",
             'description': "Modifiez les descriptions et optimisez les champs Google Shopping avec l'IA",
             'button_text': "Ouvrir",
@@ -344,14 +370,48 @@ class MainWindow(ctk.CTk):
             'enabled': True
         })
         
-        # Créer la deuxième rangée de cartes
-        if second_row_cards:
-            second_row_frame = ctk.CTkFrame(cards_wrapper)
-            second_row_frame.pack(pady=10, fill="x", anchor="w")
+        # Card Générateur CSV
+        cards.append({
+            'title': "📄 Générateur CSV",
+            'description': "Générez des CSV Shopify personnalisés en sélectionnant les champs et catégories",
+            'button_text': "Ouvrir",
+            'command': self.open_csv_generator,
+            'button_color': "orange",
+            'button_hover': "darkorange",
+            'enabled': True
+        })
+        
+        # Card Comparateur CSV
+        cards.append({
+            'title': "🔀 Comparateur CSV",
+            'description': "Comparez deux fichiers CSV Shopify et exportez avec les colonnes sélectionnées",
+            'button_text': "Ouvrir",
+            'command': self.open_csv_comparison,
+            'button_color': "teal",
+            'button_hover': "darkcyan",
+            'enabled': True
+        })
+        
+        # Card Visualiseur CSV (si disponible) - en dernier
+        if VIEWER_AVAILABLE:
+            cards.append({
+                'title': "📋 Visualiseur CSV",
+                'description': "Visualisez et sélectionnez des produits depuis un CSV Shopify",
+                'button_text': "Ouvrir",
+                'command': self.open_viewer,
+                'button_color': ["#3B8ED0", "#1F6AA5"],
+                'button_hover': ["#36719F", "#144870"],
+                'enabled': True
+            })
+        
+        # Créer les rangées de cartes (2 par rangée)
+        for i in range(0, len(cards), 2):
+            row_frame = ctk.CTkFrame(cards_wrapper)
+            row_frame.pack(pady=10, fill="x", anchor="w")
             
-            for card_info in second_row_cards:
+            for card_info in cards[i:i + 2]:
                 create_card(
-                    second_row_frame,
+                    row_frame,
                     card_info['title'],
                     card_info['description'],
                     card_info['button_text'],
@@ -377,7 +437,21 @@ class MainWindow(ctk.CTk):
         """Appelé quand la fenêtre de configuration est fermée."""
         if self.config_window:
             self.config_window.destroy()
-        self.config_window = None
+            self.config_window = None
+    
+    def open_taxonomy(self):
+        """Ouvre l'onglet de gestion de la taxonomie."""
+        # Vérifier que le setup est OK
+        if not self.is_setup_ok():
+            return
+        
+        # Effacer le contenu actuel
+        for widget in self.content_frame.winfo_children():
+            widget.destroy()
+        
+        # Créer et afficher la fenêtre Taxonomie
+        self.taxonomy_window = TaxonomyWindow(self.content_frame)
+        self.taxonomy_window.pack(fill="both", expand=True)
     
     def open_csv_config(self):
         """Ouvre la fenêtre de configuration CSV."""
@@ -486,7 +560,7 @@ class MainWindow(ctk.CTk):
             return
         
         if self.csv_generator_window is None or not self.csv_generator_window.winfo_exists():
-            from csv_generator.gui.window import CSVGeneratorWindow
+            from apps.csv_generator.gui.window import CSVGeneratorWindow
             self.csv_generator_window = CSVGeneratorWindow(self)
             self.csv_generator_window.protocol("WM_DELETE_WINDOW", self.on_csv_generator_close)
         else:
@@ -516,6 +590,48 @@ class MainWindow(ctk.CTk):
             self.cleanup_window.destroy()
         self.cleanup_window = None
     
+    def open_errors_viewer(self):
+        """Ouvre la fenêtre de visualisation des erreurs de scraping."""
+        if self.errors_viewer_window is None or not self.errors_viewer_window.winfo_exists():
+            self.errors_viewer_window = ErrorsViewerWindow(self)
+            self.errors_viewer_window.protocol("WM_DELETE_WINDOW", self.on_errors_viewer_close)
+        else:
+            self.errors_viewer_window.lift()
+    
+    def on_errors_viewer_close(self):
+        """Appelé quand la fenêtre de visualisation des erreurs est fermée."""
+        if self.errors_viewer_window:
+            self.errors_viewer_window.destroy()
+        self.errors_viewer_window = None
+    
+    def open_imports_manager(self):
+        """Ouvre la fenêtre de gestion des imports CSV."""
+        if self.imports_manager_window is None or not self.imports_manager_window.winfo_exists():
+            self.imports_manager_window = ImportsManagerWindow(self)
+            self.imports_manager_window.protocol("WM_DELETE_WINDOW", self.on_imports_manager_close)
+        else:
+            self.imports_manager_window.lift()
+    
+    def on_imports_manager_close(self):
+        """Appelé quand la fenêtre de gestion des imports est fermée."""
+        if self.imports_manager_window:
+            self.imports_manager_window.destroy()
+        self.imports_manager_window = None
+    
+    def open_csv_comparison(self):
+        """Ouvre la fenêtre de comparaison CSV."""
+        if self.csv_comparison_window is None or not self.csv_comparison_window.winfo_exists():
+            self.csv_comparison_window = CSVComparisonWindow(self)
+            self.csv_comparison_window.protocol("WM_DELETE_WINDOW", self.on_csv_comparison_close)
+        else:
+            self.csv_comparison_window.lift()
+    
+    def on_csv_comparison_close(self):
+        """Appelé quand la fenêtre de comparaison CSV est fermée."""
+        if self.csv_comparison_window:
+            self.csv_comparison_window.destroy()
+        self.csv_comparison_window = None
+    
     def open_setup(self):
         """Ouvre la fenêtre de setup."""
         if self.setup_window is None or not self.setup_window.winfo_exists():
@@ -534,6 +650,20 @@ class MainWindow(ctk.CTk):
         self.after(500, self.check_setup_status)
         # Si on est sur la page d'accueil, la rafraîchir pour mettre à jour les boutons des cartes
         self.after(600, self.refresh_home_if_needed)
+    
+    def open_help(self):
+        """Ouvre la fenêtre d'aide."""
+        if self.help_window is None or not self.help_window.winfo_exists():
+            self.help_window = HelpWindow(self)
+            self.help_window.protocol("WM_DELETE_WINDOW", self.on_help_close)
+        else:
+            self.help_window.lift()
+    
+    def on_help_close(self):
+        """Appelé quand la fenêtre d'aide est fermée."""
+        if self.help_window:
+            self.help_window.destroy()
+        self.help_window = None
     
     def refresh_home_if_needed(self):
         """Rafraîchit la page d'accueil si elle est affichée."""
@@ -642,8 +772,12 @@ class MainWindow(ctk.CTk):
             self.cleanup_window.destroy()
         if self.setup_window:
             self.setup_window.destroy()
+        if self.help_window:
+            self.help_window.destroy()
         if self.viewer_window:
             self.viewer_window.destroy()
+        if self.csv_comparison_window:
+            self.csv_comparison_window.destroy()
         if self.ai_editor_window:
             self.ai_editor_window.destroy()
         if self.csv_generator_window:

@@ -74,6 +74,7 @@ class AIEditorWindow(ctk.CTkToplevel):
         self.tab_processing = self.tabview.add("Traitement")
         self.tab_diagnostic = self.tabview.add("Diagnostic")
         self.tab_visualizer = self.tabview.add("Visualiser")
+        self.tab_history = self.tabview.add("Historique")
         
         # Remplir l'onglet Configuration
         self.create_config_tab()
@@ -89,6 +90,9 @@ class AIEditorWindow(ctk.CTkToplevel):
         
         # Remplir l'onglet Visualiser
         self.create_visualizer_tab()
+        
+        # Remplir l'onglet Historique
+        self.create_history_tab()
         
         # Centrer la fenêtre
         self.center_window()
@@ -1615,22 +1619,36 @@ class AIEditorWindow(ctk.CTkToplevel):
         )
         csv_title.pack(anchor="w", padx=20, pady=(20, 10))
         
+        # Frame pour le bouton et le label
+        button_frame = ctk.CTkFrame(csv_frame, fg_color="transparent")
+        button_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
         load_csv_button = ctk.CTkButton(
-            csv_frame,
+            button_frame,
             text="📁 Charger un fichier CSV",
             command=self.load_csv_file,
             width=250,
             height=30
         )
-        load_csv_button.pack(side="left", padx=20, pady=(0, 20))
+        load_csv_button.pack(side="left")
         
         self.csv_info_label = ctk.CTkLabel(
-            csv_frame,
+            button_frame,
             text="Aucun fichier chargé",
             font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        self.csv_info_label.pack(side="left", padx=20, pady=(0, 20))
+        self.csv_info_label.pack(side="left", padx=20)
+        
+        # Checkbox pour vider Product Category
+        self.clear_product_category_var = ctk.BooleanVar(value=False)
+        clear_pc_checkbox = ctk.CTkCheckBox(
+            csv_frame,
+            text="Vider la colonne 'Product Category' lors de l'import",
+            variable=self.clear_product_category_var,
+            font=ctk.CTkFont(size=12)
+        )
+        clear_pc_checkbox.pack(anchor="w", padx=20, pady=(0, 20))
     
     def load_csv_file(self):
         """Charge un fichier CSV."""
@@ -1642,19 +1660,27 @@ class AIEditorWindow(ctk.CTkToplevel):
         if file_path:
             try:
                 self.csv_path = file_path
-                self.csv_import_id = self.csv_storage.import_csv(file_path)
+                clear_pc = self.clear_product_category_var.get()
+                self.csv_import_id = self.csv_storage.import_csv(file_path, clear_product_category=clear_pc)
                 
                 # Récupérer les handles uniques
                 handles = self.csv_storage.get_unique_handles(self.csv_import_id)
                 
+                status_msg = f"✓ {len(handles)} produit(s) chargé(s) depuis {os.path.basename(file_path)}"
+                if clear_pc:
+                    status_msg += " (Product Category vidée)"
+                
                 self.csv_info_label.configure(
-                    text=f"✓ {len(handles)} produit(s) chargé(s) depuis {os.path.basename(file_path)}",
+                    text=status_msg,
                     text_color="green"
                 )
                 
                 # Activer les boutons de traitement
                 self.start_processing_button.configure(state="normal")
                 self.export_csv_button.configure(state="normal")
+                
+                # Charger la liste des produits pour la sélection manuelle
+                self.load_products_list()
                 
                 logger.info(f"CSV chargé avec succès: {len(handles)} produits")
                 
@@ -1671,6 +1697,118 @@ class AIEditorWindow(ctk.CTkToplevel):
                     text=f"❌ Erreur: {str(e)}",
                     text_color="red"
                 )
+    
+    def on_process_all_changed(self):
+        """Appelé quand le checkbox 'Traiter tous les produits' change."""
+        if self.process_all_var.get():
+            # Masquer la liste de sélection
+            if self.product_selection_frame.winfo_ismapped():
+                self.product_selection_frame.pack_forget()
+        else:
+            # Afficher la liste de sélection
+            if not self.product_selection_frame.winfo_ismapped():
+                # Trouver le parent (config_frame) et pack après le checkbox
+                self.product_selection_frame.pack(fill="both", expand=True, padx=20, pady=(10, 10))
+            # Charger la liste si elle n'est pas déjà chargée
+            if not self.product_checkboxes:
+                self.load_products_list()
+    
+    def load_products_list(self):
+        """Charge la liste des produits avec leurs checkboxes."""
+        if not hasattr(self, 'csv_import_id') or not self.csv_import_id:
+            return
+        
+        try:
+            # Nettoyer la liste existante
+            for widget in self.products_list_frame.winfo_children():
+                widget.destroy()
+            self.product_checkboxes.clear()
+            
+            # Récupérer le csv_import_id (avec fallback)
+            csv_import_id = self.csv_import_id
+            cursor = self.csv_storage.db.conn.cursor()
+            cursor.execute("SELECT id FROM csv_imports WHERE id = ?", (csv_import_id,))
+            if not cursor.fetchone():
+                last_import = self.csv_storage.get_last_import()
+                if last_import:
+                    csv_import_id = last_import['id']
+                else:
+                    return
+            
+            # Récupérer tous les handles uniques
+            handles = self.csv_storage.get_unique_handles(csv_import_id)
+            
+            if not handles:
+                no_products_label = ctk.CTkLabel(
+                    self.products_list_frame,
+                    text="Aucun produit trouvé",
+                    text_color="gray"
+                )
+                no_products_label.pack(pady=20)
+                return
+            
+            # Pour chaque handle, créer une checkbox avec le titre
+            for handle in sorted(handles):
+                # Récupérer le titre du produit
+                rows = self.csv_storage.get_csv_rows(csv_import_id, {handle})
+                title = handle
+                if rows:
+                    title = rows[0]['data'].get('Title', handle)
+                
+                # Frame pour chaque produit
+                product_frame = ctk.CTkFrame(self.products_list_frame)
+                product_frame.pack(fill="x", padx=5, pady=2)
+                
+                # Checkbox
+                checkbox_var = ctk.BooleanVar(value=True)  # Par défaut sélectionné
+                checkbox = ctk.CTkCheckBox(
+                    product_frame,
+                    text="",
+                    variable=checkbox_var,
+                    command=self.update_selected_count,
+                    width=30
+                )
+                checkbox.pack(side="left", padx=(10, 10))
+                
+                # Label avec titre et handle
+                display_text = f"{title} ({handle})"
+                product_label = ctk.CTkLabel(
+                    product_frame,
+                    text=display_text,
+                    anchor="w",
+                    font=ctk.CTkFont(size=11)
+                )
+                product_label.pack(side="left", fill="x", expand=True)
+                
+                # Stocker la checkbox
+                self.product_checkboxes[handle] = checkbox_var
+            
+            # Mettre à jour le compteur
+            self.update_selected_count()
+            
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de la liste des produits: {e}", exc_info=True)
+    
+    def select_all_products(self):
+        """Sélectionne tous les produits."""
+        for var in self.product_checkboxes.values():
+            var.set(True)
+        self.update_selected_count()
+    
+    def deselect_all_products(self):
+        """Désélectionne tous les produits."""
+        for var in self.product_checkboxes.values():
+            var.set(False)
+        self.update_selected_count()
+    
+    def update_selected_count(self):
+        """Met à jour le compteur de produits sélectionnés."""
+        if hasattr(self, 'selected_count_label'):
+            count = sum(1 for var in self.product_checkboxes.values() if var.get())
+            total = len(self.product_checkboxes)
+            self.selected_count_label.configure(
+                text=f"{count}/{total} produit(s) sélectionné(s)"
+            )
     
     # ========== Section 4: Configuration du batch ==========
     
@@ -1716,6 +1854,15 @@ class AIEditorWindow(ctk.CTkToplevel):
         )
         save_batch_button.pack(side="left", padx=10)
         
+        # Label affichant la valeur actuellement configurée
+        self.batch_current_value_label = ctk.CTkLabel(
+            batch_size_frame,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#1f6aa5"
+        )
+        self.batch_current_value_label.pack(side="left", padx=10)
+        
         batch_info = ctk.CTkLabel(
             batch_size_frame,
             text="(nombre de produits traités simultanément)",
@@ -1733,8 +1880,122 @@ class AIEditorWindow(ctk.CTkToplevel):
         )
         self.batch_save_status_label.pack(fill="x", padx=20, pady=(0, 10))
         
-        # Charger la valeur depuis la base de données
+        # Configuration du max_tokens
+        max_tokens_frame = ctk.CTkFrame(batch_frame)
+        max_tokens_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        max_tokens_label = ctk.CTkLabel(
+            max_tokens_frame,
+            text="Tokens max par réponse:",
+            width=200
+        )
+        max_tokens_label.pack(side="left", padx=10)
+        
+        # Dropdown max_tokens (1000 à 50000)
+        self.max_tokens_dropdown = ctk.CTkComboBox(
+            max_tokens_frame,
+            values=["1000", "2000", "3000", "4000", "5000", "6000", "7000", "8000", "9000", "10000", "15000", "20000", "25000", "30000", "40000", "50000"],
+            width=100,
+            state="readonly"
+        )
+        self.max_tokens_dropdown.set("5000")  # Valeur par défaut
+        self.max_tokens_dropdown.pack(side="left", padx=10)
+        
+        # Bouton pour sauvegarder max_tokens
+        save_max_tokens_button = ctk.CTkButton(
+            max_tokens_frame,
+            text="💾 Sauvegarder",
+            width=120,
+            command=self.save_max_tokens
+        )
+        save_max_tokens_button.pack(side="left", padx=10)
+        
+        # Label affichant la valeur actuellement configurée
+        self.max_tokens_current_value_label = ctk.CTkLabel(
+            max_tokens_frame,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#1f6aa5"
+        )
+        self.max_tokens_current_value_label.pack(side="left", padx=10)
+        
+        max_tokens_info = ctk.CTkLabel(
+            max_tokens_frame,
+            text="(limite de tokens pour les réponses IA)",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        max_tokens_info.pack(side="left", padx=10)
+        
+        # Label de confirmation de sauvegarde max_tokens
+        self.max_tokens_save_status_label = ctk.CTkLabel(
+            batch_frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="green"
+        )
+        self.max_tokens_save_status_label.pack(fill="x", padx=20, pady=(0, 10))
+        
+        # Configuration du seuil de confiance
+        confidence_threshold_frame = ctk.CTkFrame(batch_frame)
+        confidence_threshold_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        confidence_threshold_label = ctk.CTkLabel(
+            confidence_threshold_frame,
+            text="Seuil protection règles:",
+            width=200
+        )
+        confidence_threshold_label.pack(side="left", padx=10)
+        
+        # Dropdown confidence_threshold (50 à 100 par pas de 5)
+        self.confidence_threshold_dropdown = ctk.CTkComboBox(
+            confidence_threshold_frame,
+            values=["50", "55", "60", "65", "70", "75", "80", "85", "90", "95", "100"],
+            width=100,
+            state="readonly"
+        )
+        self.confidence_threshold_dropdown.set("90")  # Valeur par défaut
+        self.confidence_threshold_dropdown.pack(side="left", padx=10)
+        
+        # Bouton pour sauvegarder confidence_threshold
+        save_confidence_threshold_button = ctk.CTkButton(
+            confidence_threshold_frame,
+            text="💾 Sauvegarder",
+            width=120,
+            command=self.save_confidence_threshold
+        )
+        save_confidence_threshold_button.pack(side="left", padx=10)
+        
+        # Label affichant la valeur actuellement configurée
+        self.confidence_threshold_current_value_label = ctk.CTkLabel(
+            confidence_threshold_frame,
+            text="",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#1f6aa5"
+        )
+        self.confidence_threshold_current_value_label.pack(side="left", padx=10)
+        
+        confidence_threshold_info = ctk.CTkLabel(
+            confidence_threshold_frame,
+            text="(confiance min pour protéger une règle contre modification auto)",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        confidence_threshold_info.pack(side="left", padx=10)
+        
+        # Label de confirmation de sauvegarde confidence_threshold
+        self.confidence_threshold_save_status_label = ctk.CTkLabel(
+            batch_frame,
+            text="",
+            font=ctk.CTkFont(size=11),
+            text_color="green"
+        )
+        self.confidence_threshold_save_status_label.pack(fill="x", padx=20, pady=(0, 10))
+        
+        # Charger les valeurs depuis la base de données
         self.load_batch_size()
+        self.load_max_tokens()
+        self.load_confidence_threshold()
     
     
     def save_batch_size(self):
@@ -1750,8 +2011,11 @@ class AIEditorWindow(ctk.CTkToplevel):
             self.db.save_config('batch_size', batch_size)
             logger.info(f"Taille du batch sauvegardée: {batch_size}")
             
+            # Mettre à jour le label de la valeur actuelle
+            self.batch_current_value_label.configure(text=f"Configuré: {batch_size}")
+            
             # Afficher le message de confirmation
-            self.batch_save_status_label.configure(text=f"✓ Sauvegardé (batch_size = {batch_size})")
+            self.batch_save_status_label.configure(text=f"✓ Sauvegardé")
             
             # Faire disparaître le message après 2 secondes
             self.after(2000, lambda: self.batch_save_status_label.configure(text=""))
@@ -1775,10 +2039,115 @@ class AIEditorWindow(ctk.CTkToplevel):
             if batch_size_str not in ["1", "5", "10", "20", "50"]:
                 batch_size_str = "20"  # Fallback si valeur invalide
             self.batch_dropdown.set(batch_size_str)
+            
+            # Afficher la valeur actuellement configurée
+            self.batch_current_value_label.configure(text=f"Configuré: {batch_size_str}")
+            
             logger.info(f"Taille du batch chargée: {batch_size}")
         except Exception as e:
             logger.error(f"Erreur lors du chargement du batch size: {e}", exc_info=True)
             self.batch_dropdown.set("20")  # Valeur par défaut en cas d'erreur
+            self.batch_current_value_label.configure(text=f"Configuré: 20")
+    
+    def save_max_tokens(self):
+        """Sauvegarde le max_tokens dans la base de données."""
+        try:
+            max_tokens_str = self.max_tokens_dropdown.get()
+            if not max_tokens_str or max_tokens_str == "":
+                self.max_tokens_dropdown.set("5000")
+                return
+            
+            max_tokens = int(max_tokens_str)
+            
+            self.db.save_config('max_tokens', max_tokens)
+            logger.info(f"Max tokens sauvegardé: {max_tokens}")
+            
+            # Mettre à jour le label de la valeur actuelle
+            self.max_tokens_current_value_label.configure(text=f"Configuré: {max_tokens}")
+            
+            self.max_tokens_save_status_label.configure(text="✓ Sauvegardé")
+            
+            # Faire disparaître le message après 2 secondes
+            self.after(2000, lambda: self.max_tokens_save_status_label.configure(text=""))
+            
+        except ValueError:
+            logger.error(f"Valeur invalide pour max_tokens: {max_tokens_str}")
+            self.max_tokens_dropdown.set("5000")
+            self.max_tokens_save_status_label.configure(text="✗ Erreur: valeur invalide", text_color="red")
+            self.after(2000, lambda: self.max_tokens_save_status_label.configure(text="", text_color="green"))
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde de max_tokens: {e}", exc_info=True)
+            self.max_tokens_save_status_label.configure(text="✗ Erreur de sauvegarde", text_color="red")
+            self.after(2000, lambda: self.max_tokens_save_status_label.configure(text="", text_color="green"))
+    
+    def load_max_tokens(self):
+        """Charge le max_tokens depuis la base de données."""
+        try:
+            max_tokens = self.db.get_config_int('max_tokens', default=5000)
+            # S'assurer que la valeur est dans la liste autorisée
+            max_tokens_str = str(max_tokens)
+            if max_tokens_str not in ["1000", "2000", "3000", "4000", "5000", "6000", "7000", "8000", "9000", "10000", "15000", "20000", "25000", "30000", "40000", "50000"]:
+                max_tokens_str = "5000"  # Fallback si valeur invalide
+            self.max_tokens_dropdown.set(max_tokens_str)
+            
+            # Afficher la valeur actuellement configurée
+            self.max_tokens_current_value_label.configure(text=f"Configuré: {max_tokens_str}")
+            
+            logger.info(f"Max tokens chargé: {max_tokens}")
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de max_tokens: {e}", exc_info=True)
+            self.max_tokens_dropdown.set("5000")  # Valeur par défaut en cas d'erreur
+            self.max_tokens_current_value_label.configure(text=f"Configuré: 5000")
+    
+    def save_confidence_threshold(self):
+        """Sauvegarde le seuil de confiance dans la base de données."""
+        try:
+            confidence_threshold_str = self.confidence_threshold_dropdown.get()
+            if not confidence_threshold_str or confidence_threshold_str == "":
+                self.confidence_threshold_dropdown.set("90")
+                return
+            
+            confidence_threshold = int(confidence_threshold_str)
+            
+            self.db.save_config('confidence_threshold', confidence_threshold)
+            logger.info(f"Seuil de confiance sauvegardé: {confidence_threshold}%")
+            
+            # Mettre à jour le label de la valeur actuelle
+            self.confidence_threshold_current_value_label.configure(text=f"Configuré: {confidence_threshold}%")
+            
+            self.confidence_threshold_save_status_label.configure(text="✓ Sauvegardé")
+            
+            # Faire disparaître le message après 2 secondes
+            self.after(2000, lambda: self.confidence_threshold_save_status_label.configure(text=""))
+            
+        except ValueError:
+            logger.error(f"Valeur invalide pour confidence_threshold: {confidence_threshold_str}")
+            self.confidence_threshold_dropdown.set("90")
+            self.confidence_threshold_save_status_label.configure(text="✗ Erreur: valeur invalide", text_color="red")
+            self.after(2000, lambda: self.confidence_threshold_save_status_label.configure(text="", text_color="green"))
+        except Exception as e:
+            logger.error(f"Erreur lors de la sauvegarde de confidence_threshold: {e}", exc_info=True)
+            self.confidence_threshold_save_status_label.configure(text="✗ Erreur de sauvegarde", text_color="red")
+            self.after(2000, lambda: self.confidence_threshold_save_status_label.configure(text="", text_color="green"))
+    
+    def load_confidence_threshold(self):
+        """Charge le seuil de confiance depuis la base de données."""
+        try:
+            confidence_threshold = self.db.get_config_int('confidence_threshold', default=90)
+            # S'assurer que la valeur est dans la liste autorisée
+            confidence_threshold_str = str(confidence_threshold)
+            if confidence_threshold_str not in ["50", "55", "60", "65", "70", "75", "80", "85", "90", "95", "100"]:
+                confidence_threshold_str = "90"  # Fallback si valeur invalide
+            self.confidence_threshold_dropdown.set(confidence_threshold_str)
+            
+            # Afficher la valeur actuellement configurée
+            self.confidence_threshold_current_value_label.configure(text=f"Configuré: {confidence_threshold_str}%")
+            
+            logger.info(f"Seuil de confiance chargé: {confidence_threshold}%")
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de confidence_threshold: {e}", exc_info=True)
+            self.confidence_threshold_dropdown.set("90")  # Valeur par défaut en cas d'erreur
+            self.confidence_threshold_current_value_label.configure(text=f"Configuré: 90%")
     
     
     # ========== Section 5: Sélection des champs ==========
@@ -1820,7 +2189,8 @@ class AIEditorWindow(ctk.CTkToplevel):
             'title': ctk.BooleanVar(value=True),
             'body_html': ctk.BooleanVar(value=True),
             'tags': ctk.BooleanVar(value=True),
-            'image_alt_text': ctk.BooleanVar(value=True)
+            'image_alt_text': ctk.BooleanVar(value=True),
+            'type': ctk.BooleanVar(value=True)
         }
         
         seo_field_labels = {
@@ -1829,7 +2199,8 @@ class AIEditorWindow(ctk.CTkToplevel):
             'title': 'Title',
             'body_html': 'Body (HTML)',
             'tags': 'Tags',
-            'image_alt_text': 'Image Alt Text'
+            'image_alt_text': 'Image Alt Text',
+            'type': 'Type'
         }
         
         for field_key, label in seo_field_labels.items():
@@ -1966,6 +2337,27 @@ class AIEditorWindow(ctk.CTkToplevel):
             text="Sélectionnez un article et lancez le test pour voir les résultats",
             text_color="gray"
         )
+        self.test_no_results_label.pack(pady=50)
+        
+        # Section logs
+        logs_frame = ctk.CTkFrame(test_scroll)
+        logs_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        
+        logs_title = ctk.CTkLabel(
+            logs_frame,
+            text="📋 Logs du test",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        logs_title.pack(anchor="w", padx=20, pady=(10, 5))
+        
+        # Zone de logs
+        self.test_logs_textbox = ctk.CTkTextbox(
+            logs_frame,
+            height=200,
+            state="disabled",
+            wrap="word"
+        )
+        self.test_logs_textbox.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         self.test_no_results_label.pack(pady=50)
     
     def on_search_changed(self, event=None):
@@ -2390,9 +2782,66 @@ class AIEditorWindow(ctk.CTkToplevel):
         process_all_checkbox = ctk.CTkCheckBox(
             config_frame,
             text="Traiter tous les produits",
-            variable=self.process_all_var
+            variable=self.process_all_var,
+            command=self.on_process_all_changed
         )
         process_all_checkbox.pack(anchor="w", padx=40, pady=5)
+        
+        # Frame pour la sélection manuelle des produits
+        self.product_selection_frame = ctk.CTkFrame(config_frame)
+        # Ne pas pack par défaut, sera affiché quand "Traiter tous" est décoché
+        
+        # Titre de la sélection
+        selection_title = ctk.CTkLabel(
+            self.product_selection_frame,
+            text="Sélectionner les produits à traiter:",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        selection_title.pack(anchor="w", padx=10, pady=(10, 5))
+        
+        # Boutons de sélection rapide
+        selection_buttons_frame = ctk.CTkFrame(self.product_selection_frame)
+        selection_buttons_frame.pack(fill="x", padx=10, pady=(0, 5))
+        
+        select_all_btn = ctk.CTkButton(
+            selection_buttons_frame,
+            text="✓ Tout sélectionner",
+            command=self.select_all_products,
+            width=150,
+            height=30
+        )
+        select_all_btn.pack(side="left", padx=5)
+        
+        deselect_all_btn = ctk.CTkButton(
+            selection_buttons_frame,
+            text="✗ Tout désélectionner",
+            command=self.deselect_all_products,
+            width=150,
+            height=30
+        )
+        deselect_all_btn.pack(side="left", padx=5)
+        
+        # Compteur de produits sélectionnés
+        self.selected_count_label = ctk.CTkLabel(
+            selection_buttons_frame,
+            text="0 produit(s) sélectionné(s)",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.selected_count_label.pack(side="left", padx=20)
+        
+        # Liste scrollable des produits
+        self.products_list_frame = ctk.CTkScrollableFrame(
+            self.product_selection_frame,
+            height=200
+        )
+        self.products_list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        # Dictionnaire pour stocker les checkboxes des produits
+        self.product_checkboxes = {}  # {handle: checkbox_var}
+        
+        # Masquer par défaut (car "Traiter tous" est coché)
+        # Ne pas pack pour l'instant, sera affiché quand nécessaire
         
         # Boutons d'action
         action_frame = ctk.CTkFrame(processing_frame)
@@ -2492,6 +2941,7 @@ class AIEditorWindow(ctk.CTkToplevel):
         
         # Désactiver les boutons
         self.start_processing_button.configure(state="disabled")
+        self.export_csv_button.configure(state="disabled")
         
         # Effacer les logs (selon le contexte)
         if not use_diagnostic_logs:
@@ -2641,13 +3091,22 @@ class AIEditorWindow(ctk.CTkToplevel):
         
         # Récupérer la sélection
         if self.process_all_var.get():
-            selected_handles = None
+            selected_handles = None  # Tous les produits
         else:
-            messagebox.showinfo("Information", "La sélection manuelle n'est pas encore implémentée. Tous les produits seront traités.")
-            selected_handles = None
+            # Récupérer les handles sélectionnés
+            selected_handles = {
+                handle for handle, var in self.product_checkboxes.items() 
+                if var.get()
+            }
+            if not selected_handles:
+                messagebox.showwarning("Attention", "Veuillez sélectionner au moins un produit à traiter.")
+                self.start_processing_button.configure(state="normal")
+                self.export_csv_button.configure(state="normal")
+                return
         
-        # Désactiver le bouton
+        # Désactiver les boutons
         self.start_processing_button.configure(state="disabled")
+        self.export_csv_button.configure(state="disabled")
         
         # Effacer les logs
         self.processing_logs_textbox.configure(state="normal")
@@ -2708,7 +3167,8 @@ class AIEditorWindow(ctk.CTkToplevel):
                     progress_callback=self.update_processing_progress,
                     log_callback=self.add_processing_log,
                     cancel_check=None,
-                    enable_search=enable_search
+                    enable_search=enable_search,
+                    csv_import_id=self.csv_import_id  # Réutiliser l'import existant
                 )
                 
                 # Fermer la connexion du thread
@@ -2769,6 +3229,18 @@ class AIEditorWindow(ctk.CTkToplevel):
         except Exception:
             pass
     
+    def add_test_log(self, message: str):
+        """Ajoute un message dans les logs de test."""
+        try:
+            if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                if hasattr(self, 'test_logs_textbox'):
+                    self.test_logs_textbox.configure(state="normal")
+                    self.test_logs_textbox.insert("end", f"{message}\n")
+                    self.test_logs_textbox.see("end")
+                    self.test_logs_textbox.configure(state="disabled")
+        except Exception:
+            pass
+    
     def processing_completed(self, success: bool, output_path: Optional[str], changes_dict: Dict):
         """Appelé quand le traitement est terminé."""
         try:
@@ -2789,6 +3261,10 @@ class AIEditorWindow(ctk.CTkToplevel):
                     self.add_processing_log(f"📄 Fichier généré: {output_path}")
                 else:
                     self.add_processing_log(f"💡 Cliquez sur 'Générer CSV' pour exporter le fichier")
+                
+                # Rafraîchir le diagnostic pour afficher les nouveaux status
+                if hasattr(self, 'load_diagnostic_summary'):
+                    self.load_diagnostic_summary()
             else:
                 self.processing_progress_label.configure(
                     text="❌ Le traitement a échoué",
@@ -2804,6 +3280,7 @@ class AIEditorWindow(ctk.CTkToplevel):
                 return
             
             self.start_processing_button.configure(state="normal")
+            self.export_csv_button.configure(state="normal")
             self.processing_progress_label.configure(
                 text="❌ Erreur lors du traitement",
                 text_color="red"
@@ -2814,22 +3291,44 @@ class AIEditorWindow(ctk.CTkToplevel):
     
     def generate_csv(self):
         """Génère le CSV à partir de la table csv_rows."""
-        if not self.csv_import_id:
-            messagebox.showwarning("Attention", "Aucun fichier CSV chargé")
-            return
-        
         try:
-            # Récupérer le chemin du fichier original
+            # Utiliser self.csv_import_id s'il existe, sinon récupérer le dernier import
+            csv_import_id = None
+            
+            if self.csv_import_id:
+                # Vérifier si l'import existe encore dans la base de données
+                cursor = self.csv_storage.db.conn.cursor()
+                cursor.execute("SELECT id FROM csv_imports WHERE id = ?", (self.csv_import_id,))
+                if cursor.fetchone():
+                    csv_import_id = self.csv_import_id
+                    logger.info(f"Utilisation de l'import existant: {csv_import_id}")
+                else:
+                    logger.warning(f"Import {self.csv_import_id} introuvable, recherche du dernier import...")
+            
+            # Si pas d'import trouvé, récupérer le dernier import
+            if not csv_import_id:
+                last_import = self.csv_storage.get_last_import()
+                if last_import:
+                    csv_import_id = last_import['id']
+                    # Mettre à jour self.csv_import_id pour référence future
+                    self.csv_import_id = csv_import_id
+                    logger.info(f"Utilisation du dernier import trouvé: {csv_import_id}")
+                else:
+                    self.add_processing_log("\n❌ Aucun import CSV trouvé dans la base de données")
+                    logger.error("Aucun import CSV trouvé pour générer le CSV")
+                    return
+            
+            self.add_processing_log(f"\n💾 Génération du CSV depuis l'import ID: {csv_import_id}")
+            
+            # Récupérer le chemin du fichier original pour générer le nom de fichier
             cursor = self.csv_storage.db.conn.cursor()
-            cursor.execute("SELECT original_file_path FROM csv_imports WHERE id = ?", (self.csv_import_id,))
+            cursor.execute("SELECT original_file_path FROM csv_imports WHERE id = ?", (csv_import_id,))
             result = cursor.fetchone()
             
-            if not result:
-                messagebox.showerror("Erreur", "Import introuvable")
-                return
-            
-            original_path = result[0]
-            original_filename = os.path.basename(original_path)
+            original_filename = "ai_export"
+            if result and result[0]:
+                original_path = result[0]
+                original_filename = os.path.basename(original_path)
             
             # Extraire le fournisseur et les catégories depuis le nom du fichier original
             # Format: shopify_import_<fournisseur>_<categories>_<timestamp>.csv
@@ -2881,13 +3380,16 @@ class AIEditorWindow(ctk.CTkToplevel):
             )
             
             if file_path:
-                self.csv_storage.export_csv(self.csv_import_id, file_path)
-                messagebox.showinfo("Succès", f"CSV généré avec succès:\n{file_path}")
-                self.add_processing_log(f"\n💾 CSV exporté: {file_path}")
+                self.csv_storage.export_csv(csv_import_id, file_path)
+                self.add_processing_log(f"\n💾 CSV exporté avec succès: {file_path}")
+                logger.info(f"CSV généré: {file_path}")
+            else:
+                # L'utilisateur a annulé la sauvegarde
+                self.add_processing_log("\n⚠️ Export CSV annulé")
         
         except Exception as e:
             logger.error(f"Erreur lors de l'export: {e}", exc_info=True)
-            messagebox.showerror("Erreur", f"Erreur lors de la génération:\n{e}")
+            self.add_processing_log(f"\n❌ Erreur lors de la génération du CSV: {e}")
     
     # ========== ONGLET DIAGNOSTIC ==========
     
@@ -3007,7 +3509,26 @@ class AIEditorWindow(ctk.CTkToplevel):
     
     def load_diagnostic_summary(self):
         """Charge et affiche le résumé des status."""
-        if not hasattr(self, 'csv_import_id') or not self.csv_import_id:
+        # Déterminer quel csv_import_id utiliser
+        csv_import_id = None
+        
+        if hasattr(self, 'csv_import_id') and self.csv_import_id:
+            # Vérifier si l'import existe encore
+            cursor = self.csv_storage.db.conn.cursor()
+            cursor.execute("SELECT id FROM csv_imports WHERE id = ?", (self.csv_import_id,))
+            if cursor.fetchone():
+                csv_import_id = self.csv_import_id
+        
+        # Si pas d'import trouvé, récupérer le dernier import
+        if not csv_import_id:
+            last_import = self.csv_storage.get_last_import()
+            if last_import:
+                csv_import_id = last_import['id']
+                # Mettre à jour self.csv_import_id pour référence future
+                if hasattr(self, 'csv_import_id'):
+                    self.csv_import_id = csv_import_id
+        
+        if not csv_import_id:
             # Pas de CSV chargé
             for widget in self.status_summary_frame.winfo_children():
                 widget.destroy()
@@ -3023,7 +3544,7 @@ class AIEditorWindow(ctk.CTkToplevel):
         
         try:
             # Récupérer le résumé
-            summary = self.csv_storage.get_status_summary(self.csv_import_id)
+            summary = self.csv_storage.get_status_summary(csv_import_id)
             
             # Nettoyer le frame
             for widget in self.status_summary_frame.winfo_children():
@@ -3077,12 +3598,26 @@ class AIEditorWindow(ctk.CTkToplevel):
     
     def load_error_list(self):
         """Charge et affiche la liste des produits en erreur."""
-        if not hasattr(self, 'csv_import_id') or not self.csv_import_id:
+        # Déterminer quel csv_import_id utiliser (même logique que load_diagnostic_summary)
+        csv_import_id = None
+        
+        if hasattr(self, 'csv_import_id') and self.csv_import_id:
+            cursor = self.csv_storage.db.conn.cursor()
+            cursor.execute("SELECT id FROM csv_imports WHERE id = ?", (self.csv_import_id,))
+            if cursor.fetchone():
+                csv_import_id = self.csv_import_id
+        
+        if not csv_import_id:
+            last_import = self.csv_storage.get_last_import()
+            if last_import:
+                csv_import_id = last_import['id']
+        
+        if not csv_import_id:
             return
         
         try:
             # Récupérer les lignes en erreur
-            error_rows = self.csv_storage.get_rows_by_status(self.csv_import_id, 'error')
+            error_rows = self.csv_storage.get_rows_by_status(csv_import_id, 'error')
             
             # Nettoyer le frame
             for widget in self.errors_list_frame.winfo_children():
@@ -3282,18 +3817,44 @@ class AIEditorWindow(ctk.CTkToplevel):
         self.visualizer_results_frame = ctk.CTkScrollableFrame(results_frame, height=600)
         self.visualizer_results_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         
-        # Message initial
+        # Message initial avec instructions
         self.visualizer_no_selection_label = ctk.CTkLabel(
             self.visualizer_results_frame,
-            text="Recherchez un produit pour voir ses résultats de traitement",
+            text="💡 Comment utiliser le visualiseur:\n\n1. Tapez le nom ou le handle d'un produit dans la barre de recherche ci-dessus\n2. Sélectionnez un produit dans les suggestions qui apparaissent\n3. Les résultats du traitement s'afficheront ici",
             font=ctk.CTkFont(size=12),
-            text_color="gray"
+            text_color="gray",
+            justify="left"
         )
-        self.visualizer_no_selection_label.pack(pady=50)
+        self.visualizer_no_selection_label.pack(pady=50, padx=20)
     
     def on_visualizer_search_changed(self, *args):
         """Appelé quand le texte de recherche change dans le visualiseur."""
-        if not hasattr(self, 'csv_import_id') or not self.csv_import_id:
+        # Déterminer quel csv_import_id utiliser
+        csv_import_id = None
+        
+        if hasattr(self, 'csv_import_id') and self.csv_import_id:
+            cursor = self.csv_storage.db.conn.cursor()
+            cursor.execute("SELECT id FROM csv_imports WHERE id = ?", (self.csv_import_id,))
+            if cursor.fetchone():
+                csv_import_id = self.csv_import_id
+        
+        if not csv_import_id:
+            last_import = self.csv_storage.get_last_import()
+            if last_import:
+                csv_import_id = last_import['id']
+                if hasattr(self, 'csv_import_id'):
+                    self.csv_import_id = csv_import_id
+        
+        if not csv_import_id:
+            # Nettoyer les suggestions et afficher un message
+            for widget in self.visualizer_suggestions_frame.winfo_children():
+                widget.destroy()
+            no_import_label = ctk.CTkLabel(
+                self.visualizer_suggestions_frame,
+                text="Aucun CSV chargé. Importez un CSV dans l'onglet Traitement.",
+                text_color="gray"
+            )
+            no_import_label.pack(padx=10, pady=5)
             return
         
         search_text = self.visualizer_search_var.get().strip().lower()
@@ -3307,12 +3868,12 @@ class AIEditorWindow(ctk.CTkToplevel):
         
         try:
             # Récupérer tous les handles uniques
-            handles = self.csv_storage.get_unique_handles(self.csv_import_id)
+            handles = self.csv_storage.get_unique_handles(csv_import_id)
             
             # Pour chaque handle, récupérer le titre (première ligne du produit)
             products = {}  # {handle: title}
             for handle in handles:
-                rows = self.csv_storage.get_csv_rows(self.csv_import_id, {handle})
+                rows = self.csv_storage.get_csv_rows(csv_import_id, {handle})
                 if rows:
                     title = rows[0]['data'].get('Title', handle)
                     products[handle] = title
@@ -3353,12 +3914,39 @@ class AIEditorWindow(ctk.CTkToplevel):
     def show_product_results(self, handle: str):
         """Affiche les résultats de traitement pour un produit."""
         try:
+            # Déterminer quel csv_import_id utiliser
+            csv_import_id = None
+            
+            if hasattr(self, 'csv_import_id') and self.csv_import_id:
+                cursor = self.csv_storage.db.conn.cursor()
+                cursor.execute("SELECT id FROM csv_imports WHERE id = ?", (self.csv_import_id,))
+                if cursor.fetchone():
+                    csv_import_id = self.csv_import_id
+            
+            if not csv_import_id:
+                last_import = self.csv_storage.get_last_import()
+                if last_import:
+                    csv_import_id = last_import['id']
+            
+            if not csv_import_id:
+                # Nettoyer le frame
+                for widget in self.visualizer_results_frame.winfo_children():
+                    widget.destroy()
+                no_import_label = ctk.CTkLabel(
+                    self.visualizer_results_frame,
+                    text="Aucun CSV chargé. Importez un CSV dans l'onglet Traitement.",
+                    font=ctk.CTkFont(size=12),
+                    text_color="gray"
+                )
+                no_import_label.pack(pady=50)
+                return
+            
             # Nettoyer le frame
             for widget in self.visualizer_results_frame.winfo_children():
                 widget.destroy()
             
             # Récupérer les lignes du produit
-            rows = self.csv_storage.get_csv_rows(self.csv_import_id, [handle])
+            rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
             
             if not rows:
                 no_data_label = ctk.CTkLabel(
@@ -3506,3 +4094,230 @@ class AIEditorWindow(ctk.CTkToplevel):
         """Ferme la connexion à la base de données."""
         if hasattr(self, 'db'):
             self.db.close()
+    
+    # ========== ONGLET HISTORIQUE ==========
+    
+    def create_history_tab(self):
+        """Crée l'onglet Historique pour voir tous les imports et régénérer des CSV."""
+        # Frame scrollable
+        history_scroll = ctk.CTkScrollableFrame(self.tab_history)
+        history_scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Titre
+        title_label = ctk.CTkLabel(
+            history_scroll,
+            text="📚 Historique des imports et traitements",
+            font=ctk.CTkFont(size=20, weight="bold")
+        )
+        title_label.pack(pady=(0, 20))
+        
+        # Bouton de rafraîchissement
+        refresh_frame = ctk.CTkFrame(history_scroll)
+        refresh_frame.pack(fill="x", pady=(0, 10))
+        
+        refresh_button = ctk.CTkButton(
+            refresh_frame,
+            text="🔄 Rafraîchir",
+            command=self.load_history,
+            width=150
+        )
+        refresh_button.pack(side="left", padx=10, pady=10)
+        
+        # Frame pour la liste des imports
+        self.history_imports_frame = ctk.CTkFrame(history_scroll)
+        self.history_imports_frame.pack(fill="both", expand=True, pady=(0, 20))
+        
+        # Charger l'historique au démarrage
+        self.load_history()
+    
+    def load_history(self):
+        """Charge et affiche l'historique des imports."""
+        try:
+            # Nettoyer le frame
+            for widget in self.history_imports_frame.winfo_children():
+                widget.destroy()
+            
+            # Récupérer tous les imports
+            imports = self.db.get_all_csv_imports()
+            
+            if not imports:
+                no_imports_label = ctk.CTkLabel(
+                    self.history_imports_frame,
+                    text="Aucun import trouvé dans l'historique",
+                    font=ctk.CTkFont(size=14),
+                    text_color="gray"
+                )
+                no_imports_label.pack(pady=50)
+                return
+            
+            # Afficher chaque import
+            for import_data in imports:
+                import_card = self.create_import_card(import_data)
+                import_card.pack(fill="x", padx=10, pady=10)
+        
+        except Exception as e:
+            logger.error(f"Erreur lors du chargement de l'historique: {e}", exc_info=True)
+            error_label = ctk.CTkLabel(
+                self.history_imports_frame,
+                text=f"Erreur lors du chargement: {e}",
+                text_color="red"
+            )
+            error_label.pack(pady=20)
+    
+    def create_import_card(self, import_data: Dict) -> ctk.CTkFrame:
+        """Crée une carte pour afficher un import avec ses informations."""
+        card = ctk.CTkFrame(self.history_imports_frame)
+        
+        # En-tête avec informations principales
+        header_frame = ctk.CTkFrame(card)
+        header_frame.pack(fill="x", padx=10, pady=10)
+        
+        # Informations de l'import
+        info_frame = ctk.CTkFrame(header_frame)
+        info_frame.pack(side="left", fill="both", expand=True, padx=10)
+        
+        # Nom du fichier
+        filename = os.path.basename(import_data['original_file_path'])
+        filename_label = ctk.CTkLabel(
+            info_frame,
+            text=f"📄 {filename}",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        filename_label.pack(anchor="w", padx=5, pady=2)
+        
+        # Date d'import
+        from datetime import datetime
+        try:
+            # SQLite stocke les dates au format ISO sans timezone
+            imported_at_str = import_data['imported_at']
+            if 'T' in imported_at_str:
+                imported_at = datetime.fromisoformat(imported_at_str.replace('Z', ''))
+            else:
+                imported_at = datetime.strptime(imported_at_str, "%Y-%m-%d %H:%M:%S")
+            date_str = imported_at.strftime("%d/%m/%Y %H:%M:%S")
+        except Exception:
+            date_str = import_data['imported_at']
+        date_label = ctk.CTkLabel(
+            info_frame,
+            text=f"📅 Importé le: {date_str}",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        date_label.pack(anchor="w", padx=5, pady=2)
+        
+        # Statistiques
+        stats_text = f"📊 {import_data['unique_products']} produit(s) | {import_data['total_rows']} ligne(s)"
+        if import_data['processing_count']:
+            stats_text += f" | {import_data['processing_count']} traitement(s)"
+        stats_label = ctk.CTkLabel(
+            info_frame,
+            text=stats_text,
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        stats_label.pack(anchor="w", padx=5, pady=2)
+        
+        # Bouton pour régénérer le CSV
+        button_frame = ctk.CTkFrame(header_frame)
+        button_frame.pack(side="right", padx=10)
+        
+        regenerate_button = ctk.CTkButton(
+            button_frame,
+            text="💾 Régénérer CSV",
+            command=lambda: self.regenerate_csv_from_history(import_data['id']),
+            width=150,
+            height=35
+        )
+        regenerate_button.pack(pady=5)
+        
+        # Afficher les traitements si disponibles
+        if import_data['processing_count']:
+            treatments = self.db.get_processing_results_for_import(import_data['id'])
+            if treatments:
+                treatments_frame = ctk.CTkFrame(card)
+                treatments_frame.pack(fill="x", padx=10, pady=(0, 10))
+                
+                treatments_title = ctk.CTkLabel(
+                    treatments_frame,
+                    text="Traitements effectués:",
+                    font=ctk.CTkFont(size=12, weight="bold")
+                )
+                treatments_title.pack(anchor="w", padx=10, pady=(10, 5))
+                
+                for treatment in treatments:
+                    try:
+                        treatment_date_str_raw = treatment['created_at']
+                        if 'T' in treatment_date_str_raw:
+                            treatment_date = datetime.fromisoformat(treatment_date_str_raw.replace('Z', ''))
+                        else:
+                            treatment_date = datetime.strptime(treatment_date_str_raw, "%Y-%m-%d %H:%M:%S")
+                        treatment_date_str = treatment_date.strftime("%d/%m/%Y %H:%M")
+                    except Exception:
+                        treatment_date_str = treatment['created_at']
+                    treatment_text = f"  • {treatment['prompt_set_name'] or 'Prompt set'} - {treatment['provider_name']} ({treatment['model_name']}) - {treatment_date_str}"
+                    treatment_label = ctk.CTkLabel(
+                        treatments_frame,
+                        text=treatment_text,
+                        font=ctk.CTkFont(size=10),
+                        text_color="gray",
+                        anchor="w"
+                    )
+                    treatment_label.pack(anchor="w", padx=20, pady=2)
+        
+        return card
+    
+    def regenerate_csv_from_history(self, csv_import_id: int):
+        """Régénère le CSV pour un import sélectionné dans l'historique."""
+        try:
+            # Récupérer les informations de l'import
+            import_data = self.db.get_csv_import(csv_import_id)
+            if not import_data:
+                logger.error("Import introuvable pour la régénération")
+                return
+            
+            # Vérifier que les données existent encore
+            handles = self.csv_storage.get_unique_handles(csv_import_id)
+            if not handles:
+                logger.error("Aucune donnée trouvée pour cet import")
+                return
+            
+            # Générer le nom du fichier
+            original_filename = os.path.basename(import_data['original_file_path'])
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Extraire le fournisseur depuis le nom du fichier
+            supplier = None
+            if original_filename.startswith("shopify_import_"):
+                name_part = original_filename.replace("shopify_import_", "").replace(".csv", "")
+                parts = name_part.split("_")
+                if parts:
+                    supplier = parts[0]
+            
+            # Construire le nom du fichier
+            if supplier:
+                default_filename = f"ai_regenerated_{supplier}_{timestamp}.csv"
+            else:
+                default_filename = f"ai_regenerated_{timestamp}.csv"
+            
+            # Utiliser le répertoire Téléchargements par défaut
+            downloads_dir = os.path.expanduser("~/Downloads")
+            
+            # Demander où sauvegarder
+            file_path = filedialog.asksaveasfilename(
+                title="Sauvegarder le CSV régénéré",
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                initialfile=default_filename,
+                initialdir=downloads_dir
+            )
+            
+            if file_path:
+                # Exporter le CSV
+                self.csv_storage.export_csv(csv_import_id, file_path)
+                logger.info(f"CSV régénéré depuis l'historique: {file_path}")
+                # Rafraîchir l'historique pour mettre à jour l'affichage
+                self.load_history()
+        
+        except Exception as e:
+            logger.error(f"Erreur lors de la régénération du CSV: {e}", exc_info=True)

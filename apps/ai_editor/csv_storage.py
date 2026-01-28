@@ -44,16 +44,19 @@ class CSVStorage:
         """
         self.db = db
     
-    def import_csv(self, csv_path: str) -> int:
+    def import_csv(self, csv_path: str, clear_product_category: bool = False, update_existing: bool = True) -> int:
         """
         Charge un CSV Shopify dans la base de données.
-        ATTENTION: Supprime TOUS les imports existants avant d'importer le nouveau fichier.
+        Si update_existing=True (défaut), met à jour l'import existant du même fichier.
+        Sinon, crée un nouvel import.
         
         Args:
             csv_path: Chemin vers le fichier CSV à importer
+            clear_product_category: Si True, vide la colonne 'Product Category' lors de l'import
+            update_existing: Si True, met à jour l'import existant du même fichier (défaut)
             
         Returns:
-            csv_import_id: ID de l'import créé
+            csv_import_id: ID de l'import créé ou mis à jour
             
         Raises:
             ValueError: Si le fichier n'est pas au format Shopify
@@ -66,6 +69,11 @@ class CSVStorage:
         except Exception as e:
             logger.error(f"Erreur lors de la lecture du CSV: {e}")
             raise
+        
+        # Vider la colonne Product Category si demandé
+        if clear_product_category and 'Product Category' in df.columns:
+            df['Product Category'] = ''
+            logger.info("✓ Colonne 'Product Category' vidée lors de l'import")
         
         # VALIDATION 1: Vérifier que Handle existe (obligatoire)
         if REQUIRED_SHOPIFY_COLUMN not in df.columns:
@@ -91,11 +99,31 @@ class CSVStorage:
         logger.info(f"CSV validé: {total_rows} lignes, {len(df.columns)} colonnes")
         logger.info(f"Colonnes Shopify détectées: {', '.join(present_columns)}")
         
-        # 🗑️ SUPPRIMER TOUS LES IMPORTS EXISTANTS avant d'importer le nouveau
-        self.db.clear_all_imports()
+        # Vérifier si un import existe déjà pour ce fichier
+        cursor = self.db.conn.cursor()
+        cursor.execute('SELECT id FROM csv_imports WHERE original_file_path = ?', (csv_path,))
+        existing_import = cursor.fetchone()
         
-        # Créer le nouvel import dans la base de données
-        csv_import_id = self.db.create_csv_import(csv_path, total_rows)
+        if existing_import and update_existing:
+            # 🔄 MISE À JOUR: Supprimer seulement les lignes de cet import
+            csv_import_id = existing_import['id']
+            logger.info(f"📝 Mise à jour de l'import existant (ID: {csv_import_id})")
+            
+            # Supprimer les anciennes lignes (CASCADE supprimera aussi les traitements)
+            cursor.execute('DELETE FROM csv_rows WHERE csv_import_id = ?', (csv_import_id,))
+            
+            # Mettre à jour les infos de l'import
+            cursor.execute('''
+                UPDATE csv_imports 
+                SET imported_at = CURRENT_TIMESTAMP, total_rows = ?
+                WHERE id = ?
+            ''', (total_rows, csv_import_id))
+            
+            self.db.conn.commit()
+        else:
+            # ✨ NOUVEL IMPORT: Créer un nouveau
+            logger.info(f"✨ Création d'un nouvel import")
+            csv_import_id = self.db.create_csv_import(csv_path, total_rows)
         
         # Insérer chaque ligne dans csv_rows
         cursor = self.db.conn.cursor()
@@ -332,6 +360,7 @@ class CSVStorage:
     def export_csv(self, csv_import_id: int, output_path: str):
         """
         Exporte le CSV depuis la base de données vers un fichier.
+        Utilise csv_type depuis product_category_cache pour le champ Type.
         
         Args:
             csv_import_id: ID de l'import CSV
@@ -349,16 +378,76 @@ class CSVStorage:
         data_list = [row['data'] for row in rows]
         df = pd.DataFrame(data_list)
         
+        # Mettre à jour le champ Type avec csv_type depuis product_category_cache
+        if 'Handle' in df.columns:
+            cursor = self.db.conn.cursor()
+            for idx, handle in enumerate(df['Handle']):
+                if pd.notna(handle) and handle:
+                    # Récupérer csv_type depuis product_category_cache
+                    product_key = self.db._generate_product_key({'Handle': handle})
+                    cursor.execute('''
+                        SELECT csv_type FROM product_category_cache
+                        WHERE product_key = ?
+                    ''', (product_key,))
+                    cache_result = cursor.fetchone()
+                    
+                    if cache_result and cache_result['csv_type']:
+                        # Utiliser csv_type si disponible
+                        df.at[idx, 'Type'] = cache_result['csv_type']
+                        logger.debug(f"Type mis à jour pour {handle}: {cache_result['csv_type']}")
+        
+        # Exclure les colonnes internes/non Shopify de l'export
+        excluded_columns = {
+            '_google_category_confidence',
+            '_google_category_needs_review',
+            '_google_category_rationale',
+            'Google Category Confidence',
+            'Google Category Needs Review',
+            'Google Category Rationale',
+        }
+        existing_excluded = [col for col in df.columns if col in excluded_columns]
+        if existing_excluded:
+            df = df.drop(columns=existing_excluded)
+            logger.debug(f"Colonnes exclues de l'export: {', '.join(existing_excluded)}")
+        
         # Réordonner les colonnes selon SHOPIFY_ALL_COLUMNS si disponible
         try:
             from csv_config import SHOPIFY_ALL_COLUMNS
             # Garder l'ordre des colonnes définies dans SHOPIFY_ALL_COLUMNS
-            # Ajouter les colonnes manquantes à la fin
+            # Ajouter les colonnes manquantes à la fin (incluant les nouvelles colonnes LangGraph)
             ordered_columns = [col for col in SHOPIFY_ALL_COLUMNS if col in df.columns]
             other_columns = [col for col in df.columns if col not in ordered_columns]
             df = df[ordered_columns + other_columns]
         except ImportError:
             logger.warning("csv_config non disponible, utilisation de l'ordre par défaut")
+        
+        # S'assurer que la colonne "Google Shopping / Google Product Category" existe dans le DataFrame
+        # (même si elle n'existe pas dans toutes les lignes, elle doit être dans le CSV exporté)
+        if 'Google Shopping / Google Product Category' not in df.columns:
+            df['Google Shopping / Google Product Category'] = ''
+            logger.debug("Colonne 'Google Shopping / Google Product Category' créée (vide)")
+        else:
+            # Remplacer uniquement les NaN par des chaînes vides (garder les valeurs existantes)
+            df['Google Shopping / Google Product Category'] = df['Google Shopping / Google Product Category'].fillna('')
+            logger.debug(f"Colonne 'Google Shopping / Google Product Category' présente avec {df['Google Shopping / Google Product Category'].notna().sum()} valeurs non vides")
+            
+            # Convertir les chemins textuels en IDs numériques
+            converted_count = 0
+            for idx in df.index:
+                google_cat = df.at[idx, 'Google Shopping / Google Product Category']
+                
+                # Si la valeur contient " > ", c'est un chemin textuel, pas un ID
+                if google_cat and isinstance(google_cat, str) and ' > ' in google_cat:
+                    # Tenter de retrouver l'ID dans la taxonomie
+                    category_id = self.db.search_google_category(google_cat)
+                    if category_id:
+                        df.at[idx, 'Google Shopping / Google Product Category'] = category_id
+                        converted_count += 1
+                        logger.debug(f"Converti chemin → ID: '{google_cat}' → '{category_id}'")
+                    # Si ID non trouvé, on laisse la valeur telle quelle (pas de vidage forcé)
+            
+            if converted_count > 0:
+                logger.info(f"✓ Converti {converted_count} chemin(s) textuel(s) en ID(s) Google")
         
         # Sauvegarder le CSV
         output_file = Path(output_path)

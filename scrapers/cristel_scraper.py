@@ -184,12 +184,14 @@ class CristelScraper(BaseScraper):
                     progress_callback(f"Sous-catégorie: {subcategory_name}", idx - 1, total_subcategories)
                 
                 # Construire la commande pour scraper-subcategory.py
+                # Ne pas générer de CSV pour chaque sous-catégorie, on le fera à la fin
                 cmd = [
                     sys.executable,
                     'cristel/scraper-subcategory.py',
                     '--url', subcategory_url,
                     '--category', category_name,
-                    '--subcategory', subcategory_name
+                    '--subcategory', subcategory_name,
+                    '--skip-csv'  # Ne pas générer de CSV maintenant, on le fera à la fin
                 ]
                 
                 if limit:
@@ -230,40 +232,52 @@ class CristelScraper(BaseScraper):
                     # Continuer avec les autres sous-catégories
                     continue
             
-            # Chercher les fichiers CSV générés créés après le début du scraping
-            csv_pattern = "outputs/cristel/shopify_import_cristel_*.csv"
-            all_csv_files = glob.glob(csv_pattern)
+            # Après avoir traité toutes les sous-catégories, générer un seul CSV avec toutes
+            if log_callback:
+                log_callback(f"\n{'='*60}")
+                log_callback(f"Génération du CSV final avec toutes les sous-catégories...")
+                log_callback(f"{'='*60}\n")
             
-            # Filtrer uniquement les fichiers créés après le début du scraping
-            csv_files = [
-                f for f in all_csv_files 
-                if os.path.getmtime(f) >= start_time
-            ]
-            
-            if csv_files:
-                # Trier par date de modification (plus récent en premier)
-                csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                latest_csv = csv_files[0]
+            try:
+                # Importer le module de génération CSV
+                generate_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cristel", "scraper-generate-csv.py")
+                generate_spec = importlib.util.spec_from_file_location("cristel_generate_csv", generate_path)
+                generate_module = importlib.util.module_from_spec(generate_spec)
+                generate_spec.loader.exec_module(generate_module)
+                generate_csv_from_db = generate_module.generate_csv_from_db
                 
-                if log_callback:
-                    log_callback(f"\n✅ Scraping terminé avec succès !")
-                    log_callback(f"📄 Fichier CSV généré : {latest_csv}")
+                from utils.app_config import get_cristel_db_path
+                db_path = get_cristel_db_path()
                 
-                return True, latest_csv, None
-            else:
-                # Si aucun fichier créé pendant cette session, chercher le plus récent de tous
-                if all_csv_files:
-                    all_csv_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-                    latest_csv = all_csv_files[0]
-                    logger.warning(f"Aucun fichier créé pendant cette session, utilisation du plus récent: {latest_csv}")
+                # Récupérer toutes les sous-catégories sélectionnées
+                selected_subcategories = [subcat.get('name', '') for subcat in subcategories if subcat.get('name')]
+                
+                # Générer le CSV avec toutes les sous-catégories
+                output_file = generate_csv_from_db(
+                    output_file=None,  # Laisser le script générer le nom
+                    output_db=db_path,
+                    supplier='cristel',
+                    categories=None,  # Pas de filtrage par catégorie principale
+                    subcategories=selected_subcategories if len(selected_subcategories) > 1 else None,
+                    subcategory=selected_subcategories[0] if len(selected_subcategories) == 1 else None
+                )
+                
+                if output_file and os.path.exists(output_file):
                     if log_callback:
                         log_callback(f"\n✅ Scraping terminé avec succès !")
-                        log_callback(f"📄 Fichier CSV généré : {latest_csv}")
-                    return True, latest_csv, None
+                        log_callback(f"📄 Fichier CSV généré : {output_file}")
+                    return True, output_file, None
                 else:
                     if log_callback:
                         log_callback("\n⚠️  Aucun fichier CSV n'a été généré")
                     return False, None, "Aucun fichier CSV généré"
+                    
+            except Exception as e:
+                error_msg = f"Erreur lors de la génération du CSV final: {e}"
+                logger.error(error_msg, exc_info=True)
+                if log_callback:
+                    log_callback(f"\n❌ {error_msg}")
+                return False, None, error_msg
         
         except Exception as e:
             error_msg = f"Erreur lors du scraping: {e}"

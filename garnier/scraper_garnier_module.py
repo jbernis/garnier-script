@@ -540,7 +540,7 @@ def wait_for_site_accessible(session, base_url, check_interval=30, timeout=10):
         time.sleep(check_interval)
 
 
-def wait_for_url_accessible(session, url, check_interval=30, timeout=10):
+def wait_for_url_accessible(session, url, check_interval=30, timeout=10, max_wait_time=300):
     """
     Attend qu'une URL spécifique redevienne accessible (code 200).
     Vérifie toutes les check_interval secondes jusqu'à obtenir 200.
@@ -550,6 +550,7 @@ def wait_for_url_accessible(session, url, check_interval=30, timeout=10):
         url: URL spécifique à vérifier
         check_interval: Intervalle entre les vérifications (secondes)
         timeout: Timeout pour chaque vérification (secondes)
+        max_wait_time: Temps maximum d'attente total (secondes, défaut: 300 = 5 minutes)
     
     Returns:
         True quand l'URL redevient accessible (code 200)
@@ -563,7 +564,6 @@ def wait_for_url_accessible(session, url, check_interval=30, timeout=10):
     
     attempt = 0
     start_time = time.time()
-    max_wait_time = 300  # 5 minutes maximum (réduit de 30 minutes pour éviter les blocages)
     
     # #region agent log
     try:

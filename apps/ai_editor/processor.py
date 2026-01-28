@@ -16,7 +16,9 @@ from apps.ai_editor.db import AIPromptsDB
 from apps.ai_editor.csv_storage import CSVStorage
 from apps.ai_editor.agents import GoogleShoppingAgent, SEOAgent, QualityControlAgent
 from apps.ai_editor.category_validator import CategoryValidator
+from apps.ai_editor.langgraph_categorizer.graph import GoogleShoppingCategorizationGraph
 from utils.ai_providers import get_provider, AIProviderError
+from utils.text_utils import normalize_type
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,8 @@ SEO_FIELD_MAPPING = {
     'title': 'Title',
     'body_html': 'Body (HTML)',
     'tags': 'Tags',
-    'image_alt_text': 'Image Alt Text'
+    'image_alt_text': 'Image Alt Text',
+    'type': 'Type'
 }
 
 def add_lagustotheque_tag(tags: str) -> str:
@@ -69,6 +72,75 @@ class CSVAIProcessor:
         """
         self.db = db
         self.csv_storage = CSVStorage(db)
+    
+    def _update_concordance_table(
+        self,
+        product_type: str,
+        csv_type: str,
+        category_code: str,
+        category_path: str,
+        confidence: float,
+        force_update: bool = False
+    ) -> bool:
+        """
+        Crée ou met à jour une règle dans type_category_mapping.
+        Protège les règles à confiance >= seuil configurable contre les modifications automatiques.
+        
+        Args:
+            product_type: Type original du CSV (ex: "Accessoire")
+            csv_type: Type suggéré par SEO (ex: "TORCHONS")
+            category_code: Code de catégorie Google
+            category_path: Chemin de catégorie Google
+            confidence: Confiance du LLM Google Shopping (0.0 - 1.0)
+            force_update: Si True, permet la modification même des règles protégées
+            
+        Returns:
+            True si créé/mis à jour, False si protégé ou erreur
+        """
+        if not product_type or not csv_type or not category_code or not category_path:
+            return False
+        
+        # Récupérer le seuil depuis la configuration (par défaut 90%)
+        confidence_threshold_percent = self.db.get_config_int('confidence_threshold', default=90)
+        HIGH_CONFIDENCE_THRESHOLD = confidence_threshold_percent / 100.0  # Convertir en 0.0-1.0
+        
+        cursor = self.db.conn.cursor()
+        
+        # Vérifier si une règle existe déjà (uniquement par csv_type)
+        cursor.execute('''
+            SELECT id, confidence, category_code, category_path FROM type_category_mapping
+            WHERE csv_type = ?
+        ''', (csv_type.strip(),))
+        
+        existing = cursor.fetchone()
+        
+        # Protection: Si règle existe avec confiance >= 0.9, ne pas modifier automatiquement
+        if existing and existing['confidence'] >= HIGH_CONFIDENCE_THRESHOLD and not force_update:
+            logger.info(f"🔒 Règle protégée (confiance {existing['confidence']:.2f}): {csv_type} → {existing['category_path']}")
+            return False
+        
+        # Créer ou mettre à jour la règle
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO type_category_mapping
+                (product_type, csv_type, category_code, category_path, confidence, created_by, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (
+                product_type.strip(),
+                csv_type.strip(),
+                category_code,
+                category_path,
+                confidence,
+                'auto'
+            ))
+            self.db.conn.commit()
+            
+            action = "mise à jour" if existing else "créée"
+            logger.info(f"📝 Règle {action}: {csv_type} → {category_path} (conf: {confidence:.2f})")
+            return True
+        except Exception as e:
+            logger.error(f"Erreur lors de la création/mise à jour de la règle: {e}")
+            return False
     
     def process_batch(
         self,
@@ -136,18 +208,43 @@ class CSVAIProcessor:
                         product_changes = {}
                         field_updates = {}
                         
+                        # Déterminer quels champs sont sélectionnés
+                        seo_selected_fields = None
+                        if isinstance(selected_fields.get('seo'), dict):
+                            # Nouveau format: {'seo': {'enabled': bool, 'fields': [liste]}}
+                            seo_selected_fields = set(selected_fields['seo'].get('fields', []))
+                        elif selected_fields.get('seo'):
+                            # Ancien format: {'seo': True} - tous les champs sont sélectionnés
+                            seo_selected_fields = set(SEO_FIELD_MAPPING.keys())
+                        
                         # Mapper les champs SEO
                         for json_key, csv_field in SEO_FIELD_MAPPING.items():
                             if json_key in result and result[json_key]:
                                 new_value = result[json_key]
+                                
+                                # NORMALISATION SPÉCIALE POUR LE CHAMP TYPE
+                                # Le LLM génère 'type', on le normalise et on l'utilise pour type ET csv_type
+                                if json_key == 'type':
+                                    # Normaliser : MAJUSCULES, PLURIEL, SANS ACCENTS
+                                    original_type = new_value
+                                    new_value = normalize_type(new_value)
+                                    logger.info(f"📝 {handle}: Type normalisé: '{original_type}' → '{new_value}'")
+                                    
+                                    # IMPORTANT : Cette valeur sera utilisée pour :
+                                    # 1. Le champ CSV 'Type' (ci-dessous)
+                                    # 2. Le champ cache 'csv_type' (lignes 342-368)
+                                    # Garantie : type = csv_type = new_value
+                                
                                 original_value = rows[0]['data'].get(csv_field, '')
                                 
-                                if new_value != original_value:
-                                    field_updates[csv_field] = new_value
-                                    product_changes[csv_field] = {
-                                        'original': original_value,
-                                        'new': new_value
-                                    }
+                                # Ne mettre à jour que si le champ est sélectionné
+                                if seo_selected_fields is None or json_key in seo_selected_fields:
+                                    if new_value != original_value:
+                                        field_updates[csv_field] = new_value
+                                        product_changes[csv_field] = {
+                                            'original': original_value,
+                                            'new': new_value
+                                        }
                         
                         # Ajouter le tag Lagustothèque
                         if 'Tags' in field_updates:
@@ -163,7 +260,8 @@ class CSVAIProcessor:
                             'Title': {'min_length': 10, 'field_type': 'text'},
                             'Body (HTML)': {'min_length': 350, 'field_type': 'html'},
                             'Tags': {'min_tags': 3, 'field_type': 'tags'},
-                            'Image Alt Text': {'min_length': 10, 'field_type': 'text'}
+                            'Image Alt Text': {'min_length': 10, 'field_type': 'text'},
+                            'Type': {'min_length': 3, 'field_type': 'text'}
                         }
                         
                         # Vérifier les valeurs FINALES (après modification ou originales)
@@ -237,6 +335,54 @@ class CSVAIProcessor:
                                 if log_callback:
                                     log_callback(f"  ✓ {handle}: SEO complet")
                             
+                            # Extraire le type depuis les résultats SEO
+                            # Le LLM SEO génère UNIQUEMENT 'type', on l'utilise pour remplir csv_type
+                            # Garantie : type = csv_type (même valeur, format identique)
+                            type_value = field_updates.get('Type', '').strip()
+                            
+                            # Fallback : Si Type n'a pas été mis à jour, essayer de récupérer depuis result
+                            if not type_value:
+                                type_value = result.get('type', '').strip()
+                                if type_value:
+                                    type_value = normalize_type(type_value)
+                            
+                            # LOG: Afficher le type (qui sera copié dans csv_type)
+                            logger.info(f"📋 {handle}: Type SEO (sera copié dans csv_type): '{type_value}'")
+                            
+                            if type_value:
+                                # COPIE AUTOMATIQUE : type → csv_type
+                                # Le type généré par SEO (déjà normalisé) est copié dans csv_type
+                                # Garantie : CSV.Type = cache.csv_type = type_value
+                                product_key = self.db._generate_product_key(rows[0]['data'])
+                                
+                                try:
+                                    cursor = self.db.conn.cursor()
+                                    cursor.execute('''
+                                        UPDATE product_category_cache
+                                        SET csv_type = ?, last_used_at = CURRENT_TIMESTAMP
+                                        WHERE product_key = ?
+                                    ''', (type_value, product_key))
+                                    
+                                    # Si pas de cache existant, créer une entrée minimale
+                                    if cursor.rowcount == 0:
+                                        self.db.save_to_cache(
+                                            rows[0]['data'],
+                                            '',  # category_code vide pour l'instant
+                                            '',  # category_path vide pour l'instant
+                                            0.0,  # confidence vide pour l'instant
+                                            f'Type SEO copié dans csv_type: {type_value}',
+                                            source='seo',
+                                            csv_type=type_value
+                                        )
+                                    
+                                    self.db.conn.commit()
+                                    logger.info(f"💾 {handle}: Type copié → CSV.Type = cache.csv_type = '{type_value}'")
+                                    
+                                    # Note: La concordance sera créée APRÈS la phase Google Shopping
+                                    # (quand on aura la catégorie complète)
+                                except Exception as e:
+                                    logger.error(f"Erreur lors de la sauvegarde de csv_type pour {handle}: {e}")
+                            
                             all_changes[handle] = product_changes
                         else:
                             # Aucun champ généré - mettre à jour TOUTES les lignes
@@ -284,53 +430,184 @@ class CSVAIProcessor:
                     if log_callback:
                         log_callback(f"  ✗ Erreur batch SEO: {str(e)[:100]}")
             
-            # ===== TRAITEMENT GOOGLE SHOPPING EN BATCH =====
+            # ===== TRAITEMENT GOOGLE SHOPPING EN BATCH (LANGGRAPH) =====
+            logger.info(f"Vérification 'google_category' in agents: {'google_category' in agents}")
             if 'google_category' in agents:
+                logger.info("Début traitement Google Shopping (règles + LangGraph si nécessaire)")
                 try:
                     if log_callback:
-                        log_callback(f"  🛍️ Génération Google Shopping batch ({len(batch_products)} produits)...")
+                        log_callback(f"  🛍️ Catégorisation Google Shopping ({len(batch_products)} produits)...")
                     
-                    # Appeler generate_batch()
-                    google_results = agents['google_category'].generate_batch(batch_products)
+                    # Créer le graph LangGraph seulement si nécessaire (lazy loading)
+                    langgraph = None
+                    llm_used_count = 0
+                    rules_used_count = 0
                     
-                    # Traiter chaque résultat
-                    for result in google_results:
-                        handle = result.get('handle')
-                        if not handle or handle not in products_data:
+                    # Traiter chaque produit avec règles ou LangGraph
+                    for product_data in batch_products:
+                        handle = product_data.get('Handle')
+                        if not handle:
                             continue
                         
-                        category_path = result.get('google_category', '').strip()
+                        logger.info(f"📦 {handle}: Début catégorisation")
                         
-                        if not category_path:
-                            # Catégorie vide - mettre à jour TOUTES les lignes
-                            rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
-                            if rows:
-                                for row in rows:
-                                    self.csv_storage.update_csv_row_status(
-                                        row['id'],
-                                        'error',
-                                        error_message='Catégorie Google Shopping vide',
-                                        ai_explanation='L\'IA n\'a pas généré de catégorie'
-                                    )
-                                if log_callback:
-                                    log_callback(f"  ⚠ {handle}: Catégorie vide")
-                            continue
+                        # ÉTAPE 0: Vérifier les règles Type → Catégorie (prioritaire!)
+                        # Récupérer product_type (original) et csv_type (suggéré) depuis le cache
+                        product_key = self.db._generate_product_key(product_data)
+                        cursor = self.db.conn.cursor()
+                        cursor.execute('''
+                            SELECT product_type, csv_type FROM product_category_cache
+                            WHERE product_key = ?
+                        ''', (product_key,))
+                        cached = cursor.fetchone()
                         
-                        # Mapper le chemin vers le code
-                        category_code = self.db.search_google_category(category_path)
+                        # product_type = toujours le type original du CSV
+                        product_type = product_data.get('Type', '').strip()
+                        
+                        # csv_type = type suggéré par SEO si disponible, sinon product_type
+                        csv_type = None
+                        if cached and cached['csv_type'] and cached['csv_type'].strip():
+                            csv_type = cached['csv_type'].strip()
+                        
+                        # Chercher dans la table de concordance avec product_type + csv_type
+                        type_mapping = None
+                        if product_type:
+                            type_mapping = self.db.get_type_mapping(product_type, csv_type)
+                        
+                        if type_mapping:
+                            # ✅ RÈGLE TYPE trouvée - Utilisation directe (0 appel LLM!)
+                            category_code = type_mapping['category_code']
+                            category_path = type_mapping['category_path']
+                            confidence = type_mapping['confidence']
+                            rationale = f"Règle: {csv_type} (utilisée {type_mapping['use_count']} fois)"
+                            needs_review = False
+                            rules_used_count += 1
+                            
+                            logger.info(f"📋 {handle}: RÈGLE trouvée: {csv_type} → {category_path}")
+                            
+                            # Sauvegarder dans le cache pour historique
+                            self.db.save_to_cache(
+                                product_data,
+                                category_code,
+                                category_path,
+                                confidence,
+                                rationale,
+                                original_category_code=category_code,
+                                original_category_path=category_path,
+                                force_save=True,
+                                source='type_mapping'
+                            )
+                        else:
+                            # Pas de règle trouvée → Appeler le LLM Google Shopping
+                            # Créer le LangGraph seulement si nécessaire (lazy loading)
+                            if langgraph is None:
+                                logger.info("🤖 Initialisation du LangGraph (au moins 1 produit sans règle)")
+                                langgraph = GoogleShoppingCategorizationGraph(
+                                    self.db,
+                                    agents['google_category'].ai_provider
+                                )
+                            
+                            logger.info(f"🤖 {handle}: Appel LangGraph (pas de règle)")
+                            llm_used_count += 1
+                            result = langgraph.categorize(product_data)
+                            
+                            category_code = result['category_code']
+                            category_path = result['category_path']
+                            confidence = result['confidence']
+                            needs_review = result['needs_review']
+                            rationale = result['rationale']
+                            
+                            # Sauvegarder l'original du LLM (avant fallback parent)
+                            original_category_code = category_code
+                            original_category_path = category_path
+                            
+                            logger.info(f"📦 {handle}: Catégorie LangGraph: {category_path} (code: {category_code})")
+                            logger.info(f"  Confidence: {confidence:.2f} | Needs review: {needs_review}")
+                            
+                            # Si confidence < 50%, remonter à la catégorie parente
+                            CONFIDENCE_THRESHOLD = 0.5
+                            if confidence < CONFIDENCE_THRESHOLD and category_code:
+                                parent = self.db.get_parent_category(category_path)
+                                if parent:
+                                    category_code, category_path = parent
+                                    logger.warning(f"⬆️ {handle}: Confidence basse ({confidence:.0%}) → Catégorie parente")
+                                    logger.warning(f"  Avant: {original_category_path}")
+                                    logger.warning(f"  Après: {category_path}")
+                                    rationale = f"Catégorie parente utilisée (confidence origine: {confidence:.0%}). " + rationale
+                                    needs_review = True
+                            
+                            # Sauvegarder dans le cache pour export CSV
+                            if category_code:
+                                self.db.save_to_cache(
+                                    product_data,
+                                    category_code,
+                                    category_path,
+                                    confidence,
+                                    rationale,
+                                    original_category_code=original_category_code,
+                                    original_category_path=original_category_path,
+                                    force_save=True,
+                                    source='langgraph'
+                                )
+                                
+                                # Créer/mettre à jour la règle type_category_mapping
+                                # Récupérer product_type et csv_type depuis le cache
+                                product_key = self.db._generate_product_key(product_data)
+                                cursor = self.db.conn.cursor()
+                                cursor.execute('''
+                                    SELECT product_type, csv_type FROM product_category_cache
+                                    WHERE product_key = ?
+                                ''', (product_key,))
+                                cache_entry = cursor.fetchone()
+                                
+                                if cache_entry:
+                                    product_type = cache_entry['product_type'] or product_data.get('Type', '').strip()
+                                    csv_type = cache_entry['csv_type']
+                                    
+                                    # Créer/mettre à jour la règle si csv_type valide
+                                    if not csv_type or not csv_type.strip():
+                                        logger.warning(f"⚠️ {handle}: csv_type manquant. Le LLM SEO n'a pas généré de csv_type valide.")
+                                    elif product_type and csv_type:
+                                        self._update_concordance_table(
+                                            product_type=product_type,
+                                            csv_type=csv_type,
+                                            category_code=category_code,
+                                            category_path=category_path,
+                                            confidence=confidence  # Confidence du LLM Google Shopping
+                                        )
+                        
+                        logger.info(f"✅ {handle}: Catégorie finale: {category_path} (code: {category_code})")
+                        logger.info(f"  Confidence: {confidence:.2f} | Needs review: {needs_review}")
+                        logger.info(f"  Rationale: {rationale}")
                         
                         if category_code:
+                            # Validation : vérifier que category_code est bien un ID, pas un chemin
+                            if isinstance(category_code, str) and ' > ' in category_code:
+                                logger.warning(f"⚠️ {handle}: category_code contient un chemin au lieu d'un ID: '{category_code}'")
+                                logger.warning(f"  Ce chemin devrait être un ID numérique. Vérifier search_google_category().")
+                            
+                            # Sauvegarder dans la base
                             rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
                             if rows:
                                 for row in rows:
                                     self.csv_storage.update_csv_row(
                                         row['id'],
-                                        {'Google Shopping / Google Product Category': category_code}
+                                        {
+                                            'Google Shopping / Google Product Category': category_code,
+                                            '_google_category_confidence': confidence,
+                                            '_google_category_needs_review': needs_review,
+                                            '_google_category_rationale': rationale
+                                        }
                                     )
                                 
-                                # Mettre à jour le statut de TOUTES les lignes du produit
+                                # Statut selon needs_review
+                                status = 'completed' if not needs_review else 'warning'
                                 for row in rows:
-                                    self.csv_storage.update_csv_row_status(row['id'], 'completed')
+                                    self.csv_storage.update_csv_row_status(
+                                        row['id'],
+                                        status,
+                                        error_message=f"Confidence: {confidence:.0%}" if needs_review else None
+                                    )
                                 
                                 if handle not in all_changes:
                                     all_changes[handle] = {}
@@ -340,24 +617,36 @@ class CSVAIProcessor:
                                 }
                                 
                                 if log_callback:
-                                    log_callback(f"  ✓ {handle}: Catégorie Google Shopping mise à jour")
+                                    status_icon = "✓" if not needs_review else "⚠"
+                                    log_callback(f"  {status_icon} {handle}: {category_path} (conf: {confidence:.0%})")
                         else:
-                            # Code non trouvé - mettre à jour TOUTES les lignes
+                            # Échec complet
                             rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
                             if rows:
                                 for row in rows:
                                     self.csv_storage.update_csv_row_status(
                                         row['id'],
                                         'error',
-                                        error_message=f'Code introuvable pour "{category_path}"',
-                                        ai_explanation=f'La catégorie "{category_path}" n\'existe pas dans la taxonomie Google'
+                                        error_message='Catégorisation échouée',
+                                        ai_explanation=f'LangGraph: {rationale}'
                                     )
-                                if log_callback:
-                                    log_callback(f"  ⚠ {handle}: Code introuvable pour '{category_path}'")
+                            if log_callback:
+                                log_callback(f"  ❌ {handle}: Échec catégorisation")
+                    
+                    # Message récapitulatif
+                    if log_callback:
+                        if rules_used_count > 0 and llm_used_count == 0:
+                            log_callback(f"✓ Batch de {len(batch_products)} produits traité (100% règles, 0 appel LLM)")
+                        elif rules_used_count > 0 and llm_used_count > 0:
+                            log_callback(f"✓ Batch de {len(batch_products)} produits traité ({rules_used_count} règles, {llm_used_count} appels LLM)")
+                        elif llm_used_count > 0:
+                            log_callback(f"✓ Batch de {len(batch_products)} produits traité ({llm_used_count} appels LLM)")
+                        else:
+                            log_callback(f"✓ Batch de {len(batch_products)} produits traité")
                 
                 except Exception as e:
-                    logger.error(f"Erreur batch Google Shopping: {e}", exc_info=True)
-                    # Marquer tout le batch en erreur - TOUTES les lignes
+                    logger.error(f"Erreur LangGraph Google Shopping: {e}", exc_info=True)
+                    # Marquer tout le batch en erreur
                     for handle in batch_handles:
                         rows = self.csv_storage.get_csv_rows(csv_import_id, [handle])
                         if rows:
@@ -366,10 +655,10 @@ class CSVAIProcessor:
                                     row['id'],
                                     'error',
                                     error_message=str(e),
-                                    ai_explanation=f'Erreur lors du traitement batch Google Shopping: {e}'
+                                    ai_explanation=f'Erreur LangGraph: {e}'
                                 )
                     if log_callback:
-                        log_callback(f"  ✗ Erreur batch Google Shopping: {str(e)[:100]}")
+                        log_callback(f"  ✗ Erreur LangGraph: {str(e)[:100]}")
             
             if log_callback:
                 log_callback(f"✓ Batch de {len(batch_handles)} produits traité")
@@ -449,10 +738,9 @@ class CSVAIProcessor:
                 perplexity_api_key = None
                 perplexity_model = None
                 if enable_search and provider_name in ['openai', 'claude']:
-                    perplexity_creds = self.db.get_ai_credentials('perplexity')
-                    if perplexity_creds:
-                        perplexity_api_key = perplexity_creds['api_key']
-                        perplexity_model = perplexity_creds['default_model']
+                    perplexity_api_key = self.db.get_ai_credentials('perplexity')
+                    if perplexity_api_key:
+                        perplexity_model = self.db.get_ai_model('perplexity') or 'llama-3.1-sonar-large-128k-online'
                 
                 ai_provider = get_provider(
                     provider_name, 
@@ -494,6 +782,8 @@ class CSVAIProcessor:
                     prompt_set['system_prompt'],
                     prompt_set['google_category_prompt']
                 )
+                # Donner accès à la taxonomie pour les catégories candidates
+                agents['google_category'].set_database(self.db)
                 
                 if log_callback:
                     log_callback(f"🤖 Google Shopping: Gemini ({gemini_model})")
@@ -687,10 +977,9 @@ class CSVAIProcessor:
             perplexity_api_key = None
             perplexity_model = None
             if enable_search and provider_name in ['openai', 'claude']:
-                perplexity_creds = self.db.get_ai_credentials('perplexity')
-                if perplexity_creds:
-                    perplexity_api_key = perplexity_creds['api_key']
-                    perplexity_model = perplexity_creds['default_model']
+                perplexity_api_key = self.db.get_ai_credentials('perplexity')
+                if perplexity_api_key:
+                    perplexity_model = self.db.get_ai_model('perplexity') or 'llama-3.1-sonar-large-128k-online'
             
             from utils.ai_providers import get_provider
             ai_provider = get_provider(
@@ -730,12 +1019,15 @@ class CSVAIProcessor:
                     prompt_set['seo_system_prompt'],
                     prompt_set['seo_prompt']
                 ),
-                'google_shopping': GoogleShoppingAgent(
+                'google_category': GoogleShoppingAgent(
                     gemini_provider,
                     prompt_set['google_shopping_system_prompt'],
                     prompt_set['google_category_prompt']
                 )
             }
+            
+            # Donner accès à la taxonomie pour les catégories candidates
+            agents['google_category'].set_database(self.db)
             
             if log_callback:
                 log_callback(f"🤖 SEO: {provider_name.capitalize()} ({model_name})")

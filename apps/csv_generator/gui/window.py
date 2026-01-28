@@ -47,6 +47,9 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         self.categories_data = {}  # {category_name: {var, category, subcategories_frame, subcategories}}
         self.current_supplier_supports_subcategories = False
         
+        # Structure pour les gammes (Garnier uniquement)
+        self.gamme_checkboxes = {}  # {gamme_name: (checkbox, var)}
+        
         # Frame principal avec scrollbar
         main_frame = ctk.CTkScrollableFrame(self)
         main_frame.pack(fill="both", expand=True, padx=20, pady=20)
@@ -185,7 +188,7 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         categories_title.pack(anchor="w", padx=20, pady=(20, 10))
         
         # Checkbox "Toutes les catégories"
-        self.all_categories_var = ctk.BooleanVar(value=True)
+        self.all_categories_var = ctk.BooleanVar(value=False)
         all_categories_checkbox = ctk.CTkCheckBox(
             categories_frame,
             text="Toutes les catégories",
@@ -271,6 +274,10 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
                             variable=var
                         )
                         checkbox.pack(anchor="w", padx=10, pady=5)
+                        
+                        # Ajouter un traceur pour gérer la sélection de la catégorie
+                        var.trace_add('write', lambda *args, cat_name=category: self.on_category_checkbox_changed(cat_name))
+                        
                         self.category_checkboxes[category] = (checkbox, var)
             else:
                 self.empty_categories_label = ctk.CTkLabel(
@@ -322,6 +329,7 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
                 
                 category_data['subcategories'][subcat] = {
                     'var': var,
+                    'checkbox': checkbox,  # Stocker aussi le checkbox pour pouvoir le désactiver
                     'subcategory': subcat
                 }
             
@@ -336,32 +344,102 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             return
         
         try:
-            if category_name not in self.categories_data:
-                return
+            # Si "Toutes les catégories" est coché, ne pas permettre de cocher des catégories individuelles
+            if self.all_categories_var.get():
+                # Décocher la catégorie qui vient d'être cochée
+                if self.current_supplier_supports_subcategories:
+                    # Pour Artiga/Cristel, utiliser categories_data
+                    if category_name in self.categories_data:
+                        category_data = self.categories_data[category_name]
+                        if category_data['var'].get():
+                            self._updating_checkboxes = True
+                            try:
+                                category_data['var'].set(False)
+                            finally:
+                                self._updating_checkboxes = False
+                else:
+                    # Pour Garnier, utiliser category_checkboxes
+                    if category_name in self.category_checkboxes:
+                        checkbox, var = self.category_checkboxes[category_name]
+                        if var.get():
+                            self._updating_checkboxes = True
+                            try:
+                                var.set(False)
+                            finally:
+                                self._updating_checkboxes = False
+                return  # Ne pas continuer si "Toutes les catégories" est coché
             
-            category_data = self.categories_data[category_name]
-            is_selected = category_data['var'].get()
+            # Vérifier si la catégorie existe (selon le type de fournisseur)
+            if self.current_supplier_supports_subcategories:
+                if category_name not in self.categories_data:
+                    return
+                category_data = self.categories_data[category_name]
+                is_selected = category_data['var'].get()
+            else:
+                # Pour Garnier, utiliser category_checkboxes
+                if category_name not in self.category_checkboxes:
+                    return
+                checkbox, var = self.category_checkboxes[category_name]
+                is_selected = var.get()
+                # Créer un objet category_data factice pour la compatibilité avec le reste du code
+                category_data = {'var': var, 'subcategories': {}}
             
-            # Si la catégorie est sélectionnée, sélectionner toutes ses sous-catégories
+            # Si la catégorie est sélectionnée, déselectionner "Toutes les catégories"
             if is_selected:
-                if 'subcategories' in category_data and category_data['subcategories']:
+                if self.all_categories_var.get():
                     self._updating_checkboxes = True
                     try:
-                        for subcat_name, subcat_data in category_data['subcategories'].items():
-                            if not subcat_data['var'].get():
-                                subcat_data['var'].set(True)
+                        self.all_categories_var.set(False)
+                        # Réactiver tous les checkboxes de catégories et sous-catégories
+                        if self.current_supplier_supports_subcategories:
+                            for cat_name, cat_data in self.categories_data.items():
+                                if cat_name in self.category_checkboxes:
+                                    checkbox, var = self.category_checkboxes[cat_name]
+                                    checkbox.configure(state="normal")
+                                # Réactiver toutes les sous-catégories
+                                if 'subcategories' in cat_data:
+                                    for subcat_name, subcat_data in cat_data['subcategories'].items():
+                                        if 'checkbox' in subcat_data:
+                                            subcat_data['checkbox'].configure(state="normal")
+                        else:
+                            for checkbox, var in self.category_checkboxes.values():
+                                checkbox.configure(state="normal")
                     finally:
                         self._updating_checkboxes = False
-            else:
-                # Si la catégorie est désélectionnée, désélectionner toutes ses sous-catégories
+                
+                # Désactiver toutes les sous-catégories de cette catégorie
                 if 'subcategories' in category_data and category_data['subcategories']:
                     self._updating_checkboxes = True
                     try:
+                        # Décocher toutes les sous-catégories
                         for subcat_name, subcat_data in category_data['subcategories'].items():
                             if subcat_data['var'].get():
                                 subcat_data['var'].set(False)
+                            # Désactiver le checkbox de la sous-catégorie
+                            if 'checkbox' in subcat_data:
+                                subcat_data['checkbox'].configure(state="disabled")
                     finally:
                         self._updating_checkboxes = False
+            else:
+                # Si la catégorie est désélectionnée, réactiver toutes ses sous-catégories
+                if 'subcategories' in category_data and category_data['subcategories']:
+                    self._updating_checkboxes = True
+                    try:
+                        # Décocher toutes les sous-catégories
+                        for subcat_name, subcat_data in category_data['subcategories'].items():
+                            if subcat_data['var'].get():
+                                subcat_data['var'].set(False)
+                        # Réactiver les checkboxes des sous-catégories (seulement si "Toutes les catégories" n'est pas coché)
+                        if not self.all_categories_var.get():
+                            for subcat_name, subcat_data in category_data['subcategories'].items():
+                                if 'checkbox' in subcat_data:
+                                    subcat_data['checkbox'].configure(state="normal")
+                    finally:
+                        self._updating_checkboxes = False
+            
+            # Mettre à jour l'état des gammes (pour Garnier)
+            if not self.current_supplier_supports_subcategories:
+                self.update_gammes_state()
         except Exception as e:
             logger.error(f"Erreur dans on_category_checkbox_changed pour {category_name}: {e}", exc_info=True)
             self._updating_checkboxes = False
@@ -372,6 +450,21 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             return
         
         try:
+            # Si "Toutes les catégories" est coché, ne pas permettre de cocher des sous-catégories individuelles
+            if self.all_categories_var.get():
+                # Décocher la sous-catégorie qui vient d'être cochée
+                if category_name in self.categories_data:
+                    category_data = self.categories_data[category_name]
+                    if 'subcategories' in category_data and subcategory_name in category_data['subcategories']:
+                        subcategory_data = category_data['subcategories'][subcategory_name]
+                        if subcategory_data['var'].get():
+                            self._updating_checkboxes = True
+                            try:
+                                subcategory_data['var'].set(False)
+                            finally:
+                                self._updating_checkboxes = False
+                return  # Ne pas continuer si "Toutes les catégories" est coché
+            
             if category_name not in self.categories_data:
                 return
             
@@ -382,65 +475,183 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             subcategory_data = category_data['subcategories'][subcategory_name]
             is_selected = subcategory_data['var'].get()
             
-            # Si la sous-catégorie est sélectionnée, sélectionner aussi la catégorie parente
+            # Si la sous-catégorie est sélectionnée, déselectionner "Toutes les catégories"
             if is_selected:
-                if not category_data['var'].get():
+                if self.all_categories_var.get():
                     self._updating_checkboxes = True
                     try:
-                        category_data['var'].set(True)
+                        self.all_categories_var.set(False)
+                        # Réactiver tous les checkboxes de catégories et sous-catégories
+                        for cat_name, cat_data in self.categories_data.items():
+                            if cat_name in self.category_checkboxes:
+                                checkbox, var = self.category_checkboxes[cat_name]
+                                checkbox.configure(state="normal")
+                            # Réactiver toutes les sous-catégories
+                            if 'subcategories' in cat_data:
+                                for subcat_name, subcat_data in cat_data['subcategories'].items():
+                                    if 'checkbox' in subcat_data:
+                                        subcat_data['checkbox'].configure(state="normal")
                     finally:
                         self._updating_checkboxes = False
+                
+                # NE PLUS sélectionner automatiquement la catégorie parente
+                # Permettre la sélection uniquement de sous-catégories spécifiques
         except Exception as e:
             logger.error(f"Erreur dans on_subcategory_checkbox_changed pour {category_name} -> {subcategory_name}: {e}", exc_info=True)
             self._updating_checkboxes = False
     
     def on_all_categories_changed(self):
         """Appelé quand la checkbox 'Toutes les catégories' change."""
-        if self.all_categories_var.get():
-            # Désactiver tous les checkboxes (catégories et sous-catégories)
-            if self.current_supplier_supports_subcategories:
-                for category_name, category_data in self.categories_data.items():
-                    # Trouver le checkbox correspondant
-                    if category_name in self.category_checkboxes:
-                        checkbox, var = self.category_checkboxes[category_name]
-                        checkbox.configure(state="disabled")
-                    # Désactiver aussi les sous-catégories
-                    if 'subcategories' in category_data:
-                        for subcat_name, subcat_data in category_data['subcategories'].items():
-                            # Les checkboxes des sous-catégories sont créés mais pas stockés dans category_checkboxes
-                            # On ne peut pas les désactiver directement, mais ce n'est pas grave
-                            pass
-            else:
-                for checkbox, var in self.category_checkboxes.values():
-                    checkbox.configure(state="disabled")
-        else:
-            # Activer tous les checkboxes
-            if self.current_supplier_supports_subcategories:
-                for category_name, category_data in self.categories_data.items():
-                    if category_name in self.category_checkboxes:
-                        checkbox, var = self.category_checkboxes[category_name]
-                        checkbox.configure(state="normal")
-            else:
-                for checkbox, var in self.category_checkboxes.values():
-                    checkbox.configure(state="normal")
-    
-    def load_gammes(self, supplier: str):
-        """Charge les gammes pour un fournisseur."""
+        if self._updating_checkboxes:
+            return
+        
+        self._updating_checkboxes = True
         try:
-            gammes = self.generator.get_gammes(supplier)
+            if self.all_categories_var.get():
+                # Décocher toutes les catégories et sous-catégories individuelles
+                if self.current_supplier_supports_subcategories:
+                    for category_name, category_data in self.categories_data.items():
+                        # Décocher la catégorie
+                        if category_name in self.category_checkboxes:
+                            checkbox, var = self.category_checkboxes[category_name]
+                            var.set(False)
+                            checkbox.configure(state="disabled")
+                        # Décocher et désactiver toutes les sous-catégories
+                        if 'subcategories' in category_data:
+                            for subcat_name, subcat_data in category_data['subcategories'].items():
+                                if subcat_data['var'].get():
+                                    subcat_data['var'].set(False)
+                                # Désactiver le checkbox de la sous-catégorie
+                                if 'checkbox' in subcat_data:
+                                    subcat_data['checkbox'].configure(state="disabled")
+                else:
+                    # Pour Garnier : décocher toutes les catégories
+                    for checkbox, var in self.category_checkboxes.values():
+                        var.set(False)
+                        checkbox.configure(state="disabled")
+            else:
+                # Activer tous les checkboxes (catégories et sous-catégories)
+                if self.current_supplier_supports_subcategories:
+                    for category_name, category_data in self.categories_data.items():
+                        if category_name in self.category_checkboxes:
+                            checkbox, var = self.category_checkboxes[category_name]
+                            checkbox.configure(state="normal")
+                        # Réactiver toutes les sous-catégories
+                        if 'subcategories' in category_data:
+                            for subcat_name, subcat_data in category_data['subcategories'].items():
+                                if 'checkbox' in subcat_data:
+                                    subcat_data['checkbox'].configure(state="normal")
+                else:
+                    for checkbox, var in self.category_checkboxes.values():
+                        checkbox.configure(state="normal")
+            
+            # Mettre à jour l'état des gammes (pour Garnier)
+            if not self.current_supplier_supports_subcategories:
+                self.update_gammes_state()
+        finally:
+            self._updating_checkboxes = False
+    
+    def load_gammes(self, supplier: str, category: str = None, update_state: bool = True):
+        """Charge les gammes pour un fournisseur et crée les checkboxes.
+        
+        Args:
+            supplier: Nom du fournisseur
+            category: Catégorie pour filtrer les gammes (optionnel)
+            update_state: Si True, met à jour l'état des gammes après chargement (par défaut True)
+        """
+        try:
+            # Nettoyer les checkboxes existants
+            for checkbox, var in self.gamme_checkboxes.values():
+                checkbox.destroy()
+            self.gamme_checkboxes.clear()
+            
+            # Récupérer les gammes (filtrées par catégorie si fourni)
+            gammes = self.generator.get_gammes(supplier, category=category)
             
             if gammes:
-                # Ajouter une option vide au début pour "Toutes les gammes"
-                gammes_with_empty = [""] + gammes
-                self.gamme_dropdown.configure(values=gammes_with_empty)
-                self.gamme_dropdown.set("")  # Par défaut : toutes les gammes
+                # Créer un checkbox pour chaque gamme
+                for gamme in sorted(gammes):
+                    var = ctk.BooleanVar(value=False)
+                    checkbox = ctk.CTkCheckBox(
+                        self.gamme_scrollable_frame,
+                        text=gamme,
+                        variable=var
+                    )
+                    checkbox.pack(anchor="w", padx=10, pady=2)
+                    self.gamme_checkboxes[gamme] = (checkbox, var)
+                
+                logger.info(f"[Gammes] {len(gammes)} gamme(s) chargée(s)" + (f" pour la catégorie '{category}'" if category else ""))
+                
+                # Mettre à jour l'état des gammes seulement si demandé (évite les boucles infinies)
+                if update_state:
+                    # Utiliser after() pour s'assurer que les catégories sont complètement chargées
+                    self.after(100, self.update_gammes_state)
             else:
-                self.gamme_dropdown.configure(values=[""])
-                self.gamme_dropdown.set("")
+                logger.info(f"[Gammes] Aucune gamme trouvée" + (f" pour la catégorie '{category}'" if category else ""))
         except Exception as e:
             logger.error(f"Erreur lors du chargement des gammes: {e}", exc_info=True)
-            self.gamme_dropdown.configure(values=[""])
-            self.gamme_dropdown.set("")
+    
+    def update_gammes_state(self):
+        """Met à jour l'état des gammes : actives seulement si une seule catégorie est sélectionnée, et filtre les gammes selon la catégorie."""
+        if not self.current_supplier_supports_subcategories:
+            # Pour Garnier uniquement
+            # Compter les catégories sélectionnées
+            selected_categories = []
+            if not self.all_categories_var.get():
+                for category_name, (checkbox, var) in self.category_checkboxes.items():
+                    if var.get():
+                        selected_categories.append(category_name)
+            
+            selected_categories_count = len(selected_categories)
+            
+            # Vérifier si les gammes doivent être rechargées (changement de catégorie)
+            current_category = getattr(self, '_current_gamme_category', None)
+            should_reload = False
+            
+            if selected_categories_count == 1:
+                selected_category = selected_categories[0]
+                if current_category != selected_category:
+                    should_reload = True
+                    self._current_gamme_category = selected_category
+            elif selected_categories_count == 0 or selected_categories_count > 1:
+                if current_category is not None:
+                    should_reload = True
+                    self._current_gamme_category = None
+            
+            # Recharger les gammes seulement si nécessaire
+            if should_reload:
+                if selected_categories_count == 1:
+                    selected_category = selected_categories[0]
+                    # Recharger les gammes filtrées par cette catégorie (sans mettre à jour l'état pour éviter la boucle)
+                    self.load_gammes('garnier', category=selected_category, update_state=False)
+                    # Activer toutes les gammes chargées
+                    for gamme_name, (checkbox, var) in self.gamme_checkboxes.items():
+                        try:
+                            checkbox.configure(state="normal")
+                        except Exception as e:
+                            logger.error(f"[Gammes] Erreur lors de l'activation de la gamme {gamme_name}: {e}")
+                else:
+                    # Aucune ou plusieurs catégories sélectionnées, charger toutes les gammes mais les désactiver
+                    self.load_gammes('garnier', category=None, update_state=False)
+                    # Désactiver toutes les gammes
+                    for gamme_name, (checkbox, var) in self.gamme_checkboxes.items():
+                        try:
+                            checkbox.configure(state="disabled")
+                            var.set(False)
+                        except Exception as e:
+                            logger.error(f"[Gammes] Erreur lors de la désactivation de la gamme {gamme_name}: {e}")
+            else:
+                # Pas besoin de recharger, juste mettre à jour l'état
+                is_enabled = (selected_categories_count == 1)
+                for gamme_name, (checkbox, var) in self.gamme_checkboxes.items():
+                    try:
+                        checkbox.configure(state="normal" if is_enabled else "disabled")
+                        if not is_enabled:
+                            var.set(False)
+                    except Exception as e:
+                        logger.error(f"[Gammes] Erreur lors de la mise à jour de la gamme {gamme_name}: {e}")
+            
+            logger.info(f"[Gammes] Catégories sélectionnées: {selected_categories_count}, Gammes activées: {selected_categories_count == 1}")
     
     # ========== Section 3: Sélection des champs CSV ==========
     
@@ -541,7 +752,7 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             # Checkboxes pour ce groupe
             for field in fields:
                 if field in SHOPIFY_ALL_COLUMNS:
-                    var = ctk.BooleanVar(value=True)  # Par défaut sélectionné
+                    var = ctk.BooleanVar(value=False)  # Par défaut non sélectionné
                     checkbox = ctk.CTkCheckBox(
                         fields_scroll_frame,
                         text=field,
@@ -553,7 +764,7 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         # Ajouter les champs qui ne sont dans aucun groupe
         for field in SHOPIFY_ALL_COLUMNS:
             if field not in self.field_checkboxes:
-                var = ctk.BooleanVar(value=True)
+                var = ctk.BooleanVar(value=False)  # Par défaut non sélectionné
                 checkbox = ctk.CTkCheckBox(
                     fields_scroll_frame,
                     text=field,
@@ -706,17 +917,12 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         # Ne pas afficher par défaut, sera affiché uniquement pour Garnier
         # self.gamme_frame.pack(fill="x", padx=20, pady=(0, 20))
         
-        gamme_label = ctk.CTkLabel(self.gamme_frame, text="Gamme (optionnel):", width=150)
+        gamme_label = ctk.CTkLabel(self.gamme_frame, text="Gammes (optionnel, multiple):", width=150)
         gamme_label.pack(side="left", padx=10)
         
-        self.gamme_var = ctk.StringVar(value="")
-        self.gamme_dropdown = ctk.CTkComboBox(
-            self.gamme_frame,
-            values=[""],
-            variable=self.gamme_var,
-            width=300
-        )
-        self.gamme_dropdown.pack(side="left", padx=10, fill="x", expand=True)
+        # Frame scrollable pour les checkboxes de gammes
+        self.gamme_scrollable_frame = ctk.CTkScrollableFrame(self.gamme_frame, height=150)
+        self.gamme_scrollable_frame.pack(side="left", padx=10, fill="both", expand=True)
     
     # ========== Section 5: Génération ==========
     
@@ -753,6 +959,16 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         )
         max_images_info.pack(side="left")
         
+        # Label d'erreur (invisible par défaut)
+        self.error_label = ctk.CTkLabel(
+            generation_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="red",
+            wraplength=600
+        )
+        self.error_label.pack(pady=(0, 10))
+        
         generate_button = ctk.CTkButton(
             generation_frame,
             text="▶ Générer le CSV",
@@ -766,9 +982,13 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
     
     def generate_csv(self):
         """Génère le CSV avec les paramètres sélectionnés."""
+        # Effacer les messages d'erreur précédents
+        self.error_label.configure(text="")
+        
         # Validation
         supplier = self.supplier_var.get()
         if not supplier or supplier == "Aucun fournisseur disponible":
+            self.error_label.configure(text="❌ Veuillez sélectionner un fournisseur")
             logger.warning("Sélectionnez un fournisseur")
             return
         
@@ -778,7 +998,12 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
             if var.get()
         ]
         
+        # Debug: vérifier le nombre réellement sélectionné
+        total_fields = len(self.field_checkboxes)
+        logger.info(f"Total champs disponibles: {total_fields}, Champs sélectionnés: {len(selected_fields)}")
+        
         if not selected_fields:
+            self.error_label.configure(text="❌ Veuillez sélectionner au moins un champ CSV")
             logger.warning("Sélectionnez au moins un champ CSV")
             return
         
@@ -786,43 +1011,69 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         categories = None
         subcategories = None
         
-        # Pour les fournisseurs avec sous-catégories, vérifier d'abord si des sous-catégories sont cochées
+        # Pour les fournisseurs avec sous-catégories (Artiga/Cristel)
         if self.current_supplier_supports_subcategories:
-            selected_categories = []
-            selected_subcategories = []
+            # PRIORITÉ 1 : Si "Toutes les catégories" est coché → utiliser toutes les catégories (ignorer les sélections individuelles)
+            all_categories_checked = self.all_categories_var.get()
+            logger.info(f"[DEBUG] 'Toutes les catégories' coché: {all_categories_checked}")
             
-            for category_name, category_data in self.categories_data.items():
-                category_selected = category_data['var'].get()
-                
-                # Vérifier les sous-catégories sélectionnées
-                has_selected_subcategories = False
-                if 'subcategories' in category_data:
-                    for subcat_name, subcat_data in category_data['subcategories'].items():
-                        if subcat_data['var'].get():
-                            selected_subcategories.append(subcat_name)
-                            has_selected_subcategories = True
-                
-                # Si la catégorie est sélectionnée mais aucune sous-catégorie, utiliser la catégorie
-                if category_selected and not has_selected_subcategories:
-                    selected_categories.append(category_name)
-            
-            # PRIORITÉ : Si des sous-catégories sont sélectionnées, les utiliser (ignore "Toutes les catégories")
-            if selected_subcategories:
-                subcategories = selected_subcategories
-                categories = None
-                logger.info(f"Sous-catégories sélectionnées: {selected_subcategories}")
-            elif selected_categories:
-                categories = selected_categories
-                subcategories = None
-                logger.info(f"Catégories sélectionnées: {selected_categories}")
-            elif self.all_categories_var.get():
-                # Seulement si rien n'est coché, utiliser "Toutes les catégories"
+            if all_categories_checked:
                 categories = None
                 subcategories = None
-                logger.info("Toutes les catégories sélectionnées")
+                logger.info("Toutes les catégories sélectionnées (priorité sur sélections individuelles)")
+                # Stocker pour les logs UI
+                self._ui_selected_categories = None
+                self._ui_selected_subcategories = None
             else:
-                logger.warning("Sélectionnez au moins une catégorie ou sous-catégorie")
-                return
+                # Nouvelle logique :
+                # - Si une catégorie est sélectionnée → utiliser la catégorie (pas les sous-catégories individuelles)
+                # - Si seulement des sous-catégories spécifiques sont sélectionnées (sans la catégorie parente) → utiliser ces sous-catégories
+                selected_categories = []
+                selected_subcategories = []
+                
+                # Parcourir toutes les catégories et leurs sous-catégories
+                for category_name, category_data in self.categories_data.items():
+                    category_selected = category_data['var'].get()
+                    
+                    # Vérifier les sous-catégories sélectionnées pour cette catégorie
+                    category_subcategories = []
+                    if 'subcategories' in category_data and category_data['subcategories']:
+                        for subcat_name, subcat_data in category_data['subcategories'].items():
+                            if subcat_data['var'].get():
+                                category_subcategories.append(subcat_name)
+                    
+                    # Debug: afficher l'état de chaque catégorie
+                    logger.info(f"Catégorie '{category_name}': sélectionnée={category_selected}, sous-catégories sélectionnées={category_subcategories}")
+                    
+                    if category_selected:
+                        # Catégorie sélectionnée → utiliser la catégorie (ignorer les sous-catégories individuelles)
+                        selected_categories.append(category_name)
+                        logger.info(f"  → Catégorie '{category_name}' sélectionnée, utilisation de la catégorie complète")
+                    elif category_subcategories:
+                        # Catégorie NON sélectionnée MAIS des sous-catégories sont sélectionnées → utiliser ces sous-catégories
+                        selected_subcategories.extend(category_subcategories)
+                        logger.info(f"  → Sous-catégories spécifiques sélectionnées pour '{category_name}': {category_subcategories}")
+                
+                # Déterminer ce qui est sélectionné
+                # NOUVELLE LOGIQUE : Combiner catégories complètes ET sous-catégories individuelles
+                if selected_categories or selected_subcategories:
+                    # Utiliser les catégories complètes sélectionnées (peut être None)
+                    categories = selected_categories if selected_categories else None
+                    # ET ajouter les sous-catégories individuelles (peut être None)
+                    subcategories = selected_subcategories if selected_subcategories else None
+                    
+                    logger.info(f"Catégories complètes sélectionnées: {categories}")
+                    logger.info(f"Sous-catégories individuelles sélectionnées: {subcategories}")
+                    
+                    # Stocker pour les logs UI
+                    self._ui_selected_categories = selected_categories if selected_categories else None
+                    self._ui_selected_subcategories = selected_subcategories if selected_subcategories else None
+                else:
+                    # Rien n'est sélectionné
+                    error_msg = "❌ Veuillez sélectionner au moins une catégorie ou sous-catégorie, ou cocher 'Toutes les catégories'"
+                    self.error_label.configure(text=error_msg)
+                    logger.warning("Sélectionnez au moins une catégorie ou sous-catégorie")
+                    return
         else:
             # Pour Garnier (pas de sous-catégories)
             if not self.all_categories_var.get():
@@ -831,10 +1082,18 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
                     if var.get()
                 ]
                 if not categories:
+                    error_msg = "❌ Veuillez sélectionner au moins une catégorie ou cocher 'Toutes les catégories'"
+                    self.error_label.configure(text=error_msg)
                     logger.warning("Sélectionnez au moins une catégorie ou cochez 'Toutes les catégories'")
                     return
+                # Stocker pour les logs UI
+                self._ui_selected_categories = categories
+                self._ui_selected_subcategories = None
             else:
                 categories = None  # Toutes les catégories
+                # Stocker pour les logs UI
+                self._ui_selected_categories = None
+                self._ui_selected_subcategories = None
         
         # Récupérer les options        
         handle_source = self.handle_source_var.get()
@@ -844,7 +1103,12 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         # Le vendor est toujours le nom du fournisseur capitalisé
         vendor = supplier.capitalize()
         
-        gamme = self.gamme_var.get().strip() or None
+        # Récupérer les gammes sélectionnées (multiple)
+        selected_gammes = [
+            gamme_name for gamme_name, (checkbox, var) in self.gamme_checkboxes.items()
+            if var.get()
+        ]
+        gamme = selected_gammes if selected_gammes else None  # Passer la liste complète
         
         # Récupérer le nombre max d'images
         max_images_str = self.max_images_var.get().strip()
@@ -863,11 +1127,66 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
         # Ouvrir la fenêtre de progression
         self.progress_window = ProgressWindow(self, title="Génération CSV")
         self.progress_window.add_log(f"Génération du CSV pour {supplier}...")
-        if subcategories:
-            self.progress_window.add_log(f"Sous-catégories: {len(subcategories)}")
+        
+        # Afficher les logs selon ce qui est réellement utilisé
+        if self.current_supplier_supports_subcategories:
+            # Pour Artiga/Cristel : utiliser les valeurs stockées pour les logs UI
+            ui_subcategories = getattr(self, '_ui_selected_subcategories', None)
+            ui_categories = getattr(self, '_ui_selected_categories', None)
+            
+            if ui_subcategories:
+                self.progress_window.add_log(f"Sous-catégories ({len(ui_subcategories)}): {', '.join(ui_subcategories)}")
+            elif ui_categories:
+                self.progress_window.add_log(f"Catégories ({len(ui_categories)}): {', '.join(ui_categories)}")
+            else:
+                self.progress_window.add_log(f"Catégories: Toutes")
         else:
-            self.progress_window.add_log(f"Catégories: {len(categories) if categories else 'Toutes'}")
-        self.progress_window.add_log(f"Champs sélectionnés: {len(selected_fields)}")
+            # Pour Garnier : afficher les catégories
+            if categories:
+                self.progress_window.add_log(f"Catégories ({len(categories)}): {', '.join(categories)}")
+            else:
+                self.progress_window.add_log(f"Catégories: Toutes")
+        
+        # Le nombre de produits sera affiché après la génération (dans generation_completed)
+        # On laisse un espace pour l'instant
+        
+        # Afficher le nombre réellement sélectionné et la liste des champs
+        num_selected = len(selected_fields)
+        total_available = len(self.field_checkboxes)
+        
+        if num_selected == total_available:
+            self.progress_window.add_log(f"Champs sélectionnés: {num_selected} (tous)")
+        else:
+            self.progress_window.add_log(f"Champs sélectionnés: {num_selected} sur {total_available}")
+            # Afficher la liste complète des champs sélectionnés
+            if num_selected > 0:
+                fields_list = ', '.join(sorted(selected_fields))
+                # Diviser en plusieurs lignes si trop long (max 100 caractères par ligne)
+                if len(fields_list) > 100:
+                    # Diviser intelligemment par virgules
+                    words = fields_list.split(', ')
+                    current_line = ""
+                    for word in words:
+                        if len(current_line) + len(word) + 2 > 100:  # +2 pour ", "
+                            if current_line:
+                                self.progress_window.add_log(f"  → {current_line}")
+                            current_line = word
+                        else:
+                            if current_line:
+                                current_line += ", " + word
+                            else:
+                                current_line = word
+                    if current_line:
+                        self.progress_window.add_log(f"  → {current_line}")
+                else:
+                    self.progress_window.add_log(f"  → {fields_list}")
+            
+            # Afficher les champs NON sélectionnés
+            all_fields = set(self.field_checkboxes.keys())
+            selected_fields_set = set(selected_fields)
+            unselected_fields = sorted(all_fields - selected_fields_set)
+            if unselected_fields:
+                self.progress_window.add_log(f"Champs non sélectionnés ({len(unselected_fields)}): {', '.join(unselected_fields)}")
         
         def generate_thread():
             try:
@@ -904,6 +1223,53 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
     def generation_completed(self, output_path: str):
         """Appelé quand la génération est terminée."""
         try:
+            # Effacer le message d'erreur
+            self.error_label.configure(text="")
+            
+            # Compter les produits depuis le CSV généré et les insérer au bon endroit
+            try:
+                import pandas as pd
+                if output_path and os.path.exists(output_path):
+                    df = pd.read_csv(output_path)
+                    # Compter les handles uniques (chaque handle = un produit)
+                    unique_handles = df['Handle'].nunique() if 'Handle' in df.columns else 0
+                    if unique_handles > 0:
+                        # Insérer le nombre de produits juste après les catégories (avant les champs)
+                        # On va récupérer le contenu actuel, insérer le log au bon endroit, et le réécrire
+                        if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
+                            try:
+                                # Récupérer le contenu actuel du textbox
+                                current_content = self.progress_window.log_textbox.get("1.0", "end-1c")
+                                lines = current_content.split('\n')
+                                
+                                # Trouver l'index de la ligne "Catégories" ou "Sous-catégories"
+                                insert_index = -1
+                                for i, line in enumerate(lines):
+                                    if line.startswith("Catégories") or line.startswith("Sous-catégories"):
+                                        insert_index = i + 1
+                                        break
+                                
+                                # Insérer le log du nombre de produits juste après les catégories
+                                if insert_index > 0:
+                                    lines.insert(insert_index, f"Produits exportés: {unique_handles}")
+                                    # Réécrire tout le contenu
+                                    self.progress_window.log_textbox.configure(state="normal")
+                                    self.progress_window.log_textbox.delete("1.0", "end")
+                                    self.progress_window.log_textbox.insert("1.0", '\n'.join(lines))
+                                    self.progress_window.log_textbox.see("end")
+                                    self.progress_window.update_idletasks()
+                                else:
+                                    # Si on ne trouve pas la ligne catégories, ajouter à la fin
+                                    self.progress_window.add_log(f"Produits exportés: {unique_handles}")
+                                
+                                logger.info(f"[UI] Nombre de produits compté depuis CSV: {unique_handles}")
+                            except Exception as insert_error:
+                                # En cas d'erreur lors de l'insertion, ajouter simplement à la fin
+                                logger.warning(f"Erreur lors de l'insertion du nombre de produits: {insert_error}")
+                                self.progress_window.add_log(f"Produits exportés: {unique_handles}")
+            except Exception as e:
+                logger.warning(f"Impossible de compter les produits depuis le CSV: {e}")
+            
             if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
                 self.progress_window.finish(success=True, output_file=output_path)
                 logger.info(f"CSV généré avec succès: {output_path}")
@@ -913,6 +1279,8 @@ class CSVGeneratorWindow(ctk.CTkToplevel):
     def generation_error(self, error_msg: str):
         """Appelé en cas d'erreur lors de la génération."""
         try:
+            # Afficher l'erreur dans le label
+            self.error_label.configure(text=f"❌ Erreur: {error_msg}")
             if self.progress_window and hasattr(self.progress_window, 'winfo_exists') and self.progress_window.winfo_exists():
                 self.progress_window.finish(success=False, error=error_msg)
                 logger.error(f"Erreur lors de la génération: {error_msg}")

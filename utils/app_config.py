@@ -4,7 +4,9 @@ Gestion de la configuration de l'application.
 
 import json
 import os
+import sys
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +61,31 @@ def set_config(key: str, value):
 def get_supplier_db_path(supplier: str) -> str:
     """Retourne automatiquement le chemin de la base de données pour un fournisseur donné.
     
-    Format automatique: database/{supplier}_products.db
+    En mode packagé: ~/Library/Application Support/ScrapersShopify/database/{supplier}_products.db
+    En mode dev: database/{supplier}_products.db
     
     Args:
         supplier: Nom du fournisseur ('garnier', 'cristel', 'artiga', etc.)
     
     Returns:
-        Chemin de la base de données au format database/{supplier}_products.db
+        Chemin de la base de données
     
     Exemples:
-        get_supplier_db_path('garnier') → 'database/garnier_products.db'
-        get_supplier_db_path('cristel') → 'database/cristel_products.db'
-        get_supplier_db_path('artiga') → 'database/artiga_products.db'
+        get_supplier_db_path('garnier') → 'database/garnier_products.db' (dev)
+        get_supplier_db_path('garnier') → '~/Library/.../database/garnier_products.db' (packagé)
     """
     supplier_lower = supplier.lower().strip()
-    return f"database/{supplier_lower}_products.db"
+    
+    if getattr(sys, "frozen", False):
+        # Mode packagé : utiliser Application Support
+        base_dir = Path.home() / "Library" / "Application Support" / "ScrapersShopify"
+        db_path = base_dir / "database" / f"{supplier_lower}_products.db"
+        # Créer le répertoire si nécessaire
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        return str(db_path)
+    else:
+        # Mode développement
+        return f"database/{supplier_lower}_products.db"
 
 
 def get_garnier_db_path() -> str:

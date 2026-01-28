@@ -371,10 +371,8 @@ class GarnierScraper(BaseScraper):
                 process_cmd.extend(["--gamme", gamme_name])
             elif categories:
                 # Mode catégories : filtrer par toutes les catégories sélectionnées
-                # Note: scraper-garnier-process.py ne supporte qu'une seule catégorie pour l'instant
-                # On prend la première catégorie
-                if len(categories) > 0:
-                    process_cmd.extend(["--category", categories[0]['name']])
+                for category in categories:
+                    process_cmd.extend(["--category", category['name']])
             
             if not headless:
                 process_cmd.append("--no-headless")

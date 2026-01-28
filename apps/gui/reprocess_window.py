@@ -83,7 +83,7 @@ class ReprocessWindow(ctk.CTkToplevel):
         ).pack(anchor="w", padx=10, pady=(10, 5))
         
         select_frame = ctk.CTkFrame(section1)
-        select_frame.pack(fill="x", padx=10, pady=(0, 10))
+        select_frame.pack(fill="x", padx=10, pady=(0, 5))
         
         ctk.CTkLabel(select_frame, text="Catégorie:").pack(side="left", padx=5)
         
@@ -94,6 +94,19 @@ class ReprocessWindow(ctk.CTkToplevel):
             command=self._on_category_selected
         )
         self.category_combo.pack(side="left", padx=5)
+        
+        # Bouton Rafraîchir en dessous
+        refresh_frame = ctk.CTkFrame(section1)
+        refresh_frame.pack(fill="x", padx=10, pady=(0, 10))
+        
+        refresh_btn = ctk.CTkButton(
+            refresh_frame,
+            text="🔄 Rafraîchir les statistiques",
+            command=self._refresh_stats,
+            width=200,
+            height=32
+        )
+        refresh_btn.pack(side="left", padx=5)
         
         # [2] Statistiques
         section2 = ctk.CTkFrame(main_frame)
@@ -221,6 +234,44 @@ class ReprocessWindow(ctk.CTkToplevel):
             height=30
         )
         cancel_btn.pack(side="left", padx=5)
+        
+        # [4] Export CSV
+        section4 = ctk.CTkFrame(main_frame)
+        section4.pack(fill="x", padx=20, pady=(10, 20))
+        
+        ctk.CTkLabel(
+            section4,
+            text="[4] Export CSV",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+        
+        export_frame = ctk.CTkFrame(section4)
+        export_frame.pack(fill="x", padx=10, pady=(0, 10))
+        
+        # Checkbox pour exclure les erreurs
+        self.exclude_errors_var = ctk.BooleanVar(value=False)  # Décoché par défaut
+        exclude_errors_check = ctk.CTkCheckBox(
+            export_frame,
+            text="Exclure les produits en erreur du CSV",
+            variable=self.exclude_errors_var,
+            command=self._on_exclude_errors_changed
+        )
+        exclude_errors_check.pack(anchor="w", padx=10, pady=5)
+        
+        # Bouton d'export
+        export_buttons_frame = ctk.CTkFrame(export_frame)
+        export_buttons_frame.pack(fill="x", padx=10, pady=(5, 10))
+        
+        self.export_csv_btn = ctk.CTkButton(
+            export_buttons_frame,
+            text="📥 Exporter CSV",
+            command=self._export_csv,
+            state="disabled",
+            height=30,
+            fg_color="green",
+            hover_color="darkgreen"
+        )
+        self.export_csv_btn.pack(side="left", padx=5)
     
     def _load_categories(self):
         """Charge les catégories disponibles depuis la DB."""
@@ -255,6 +306,12 @@ class ReprocessWindow(ctk.CTkToplevel):
         """Appelé quand une catégorie est sélectionnée."""
         self.current_category = category
         self._load_stats()
+    
+    def _refresh_stats(self):
+        """Rafraîchit les statistiques de la catégorie actuelle."""
+        if self.current_category:
+            logger.info(f"Rafraîchissement des statistiques pour: {self.current_category}")
+            self._load_stats()
     
     def _load_stats(self):
         """Charge et affiche les statistiques de la catégorie."""
@@ -335,16 +392,36 @@ class ReprocessWindow(ctk.CTkToplevel):
             except Exception:
                 pass
             
+            # Gérer l'état du bouton d'export CSV
+            # Le bouton est activé si :
+            # - Il y a des produits complétés ET (pas d'erreurs OU checkbox cochée)
+            has_completed = products['completed'] > 0
+            has_errors = products['error'] > 0 or variants['error'] > 0
+            checkbox_checked = self.exclude_errors_var.get() if hasattr(self, 'exclude_errors_var') else False
+            
+            # Activer le bouton si : produits complétés ET (pas d'erreurs OU checkbox cochée)
+            should_enable = has_completed and (not has_errors or checkbox_checked)
+            
+            try:
+                if hasattr(self, 'export_csv_btn'):
+                    self.export_csv_btn.configure(state="normal" if should_enable else "disabled")
+            except Exception:
+                pass
+            
             # Mettre à jour le texte des checkboxes (dans l'ordre d'exécution) - Protégé
             try:
                 if self.scraper.name.lower() == 'garnier' and gammes_stats:
+                    logger.info(f"Stats gammes pour {self.current_category}: {gammes_stats}")
                     if hasattr(self, 'error_gammes_check'):
+                        error_count = gammes_stats['error']
+                        logger.info(f"Gammes en erreur: {error_count}")
                         self.error_gammes_check.configure(
-                            text=f"0️⃣ Re-collecter les gammes en ERREUR ({gammes_stats['error']}) - Force une nouvelle collecte",
-                            state="normal" if gammes_stats['error'] > 0 else "disabled"
+                            text=f"0️⃣ Re-collecter les gammes en ERREUR ({error_count}) - Force une nouvelle collecte",
+                            state="normal" if error_count > 0 else "disabled"
                         )
-            except Exception:
-                pass
+                        logger.info(f"Checkbox gammes erreur: état={'normal' if error_count > 0 else 'disabled'}")
+            except Exception as e:
+                logger.error(f"Erreur lors de la configuration de la checkbox gammes: {e}", exc_info=True)
             
             try:
                 if hasattr(self, 'error_products_check'):
@@ -432,25 +509,67 @@ class ReprocessWindow(ctk.CTkToplevel):
         # Lancer le retraitement dans un thread
         def run_reprocessing():
             try:
-                for action_type, action_label in actions:
+                # Liste des actions initiales
+                initial_actions = actions.copy()
+                
+                for action_type, action_label in initial_actions:
                     progress_window.add_log(f"\n{'='*50}")
                     progress_window.add_log(f"▶ {action_label}...")
                     progress_window.add_log(f"{'='*50}\n")
                     
                     if action_type == 'recollect_error_gammes':
                         self._recollect_gammes(progress_window, status='error')
+                        
+                        # Après avoir recollecté les gammes, vérifier s'il y a maintenant des variants pending à traiter
+                        if self.reprocess_pending_variants.get():
+                            # Recharger les stats pour voir combien de variants pending il y a maintenant
+                            db_path = get_supplier_db_path(self.scraper.name.lower())
+                            db = self.db_class(db_path)
+                            fresh_stats = db.get_category_stats(self.current_category)
+                            db.close()
+                            
+                            if fresh_stats['variants']['pending'] > 0:
+                                # Ajouter l'action si elle n'est pas déjà dans la liste
+                                if ('process_pending_variants', 'Traitement des variants pending') not in initial_actions:
+                                    progress_window.add_log(f"\n💡 {fresh_stats['variants']['pending']} variant(s) pending détecté(s) après recollecte des gammes")
+                                    progress_window.add_log("   → Ajout automatique du traitement des variants pending\n")
+                                    
+                                    # Exécuter immédiatement le traitement des variants pending
+                                    progress_window.add_log(f"\n{'='*50}")
+                                    progress_window.add_log(f"▶ Traitement des variants pending...")
+                                    progress_window.add_log(f"{'='*50}\n")
+                                    self._process_variants(progress_window, 'pending')
+                        
                     elif action_type == 'process_error_variants':
                         self._process_variants(progress_window, 'error')
                     elif action_type == 'process_pending_variants':
                         self._process_variants(progress_window, 'pending')
                     elif action_type == 'recollect_error_products':
                         self._recollect_products(progress_window)
+                        
+                        # Après avoir recollecté les produits, même logique pour les variants
+                        if self.reprocess_pending_variants.get():
+                            db_path = get_supplier_db_path(self.scraper.name.lower())
+                            db = self.db_class(db_path)
+                            fresh_stats = db.get_category_stats(self.current_category)
+                            db.close()
+                            
+                            if fresh_stats['variants']['pending'] > 0:
+                                if ('process_pending_variants', 'Traitement des variants pending') not in initial_actions:
+                                    progress_window.add_log(f"\n💡 {fresh_stats['variants']['pending']} variant(s) pending détecté(s) après recollecte des produits")
+                                    progress_window.add_log("   → Ajout automatique du traitement des variants pending\n")
+                                    
+                                    progress_window.add_log(f"\n{'='*50}")
+                                    progress_window.add_log(f"▶ Traitement des variants pending...")
+                                    progress_window.add_log(f"{'='*50}\n")
+                                    self._process_variants(progress_window, 'pending')
                 
                 progress_window.add_log("\n✅ Retraitement terminé avec succès !")
                 progress_window.finish(success=True)
                 
-                # Actualiser les stats
-                self.after(500, self._load_stats)
+                # Actualiser les stats après un délai plus long
+                progress_window.add_log("\n💡 Rafraîchissement des statistiques dans 2 secondes...")
+                self.after(2000, self._load_stats)
                 
             except Exception as e:
                 logger.error(f"Erreur lors du retraitement: {e}", exc_info=True)
@@ -505,6 +624,10 @@ class ReprocessWindow(ctk.CTkToplevel):
     def _recollect_gammes(self, progress_window, status='error'):
         """Lance le script de re-collecte des gammes selon leur statut.
         
+        Cette fonction effectue 2 étapes automatiquement :
+        1. Recollecte les noms des gammes en erreur (les met en "pending")
+        2. Collecte les produits et variants de ces gammes "pending"
+        
         Args:
             progress_window: Fenêtre de progression
             status: 'error', 'processing' ou 'pending'
@@ -517,29 +640,23 @@ class ReprocessWindow(ctk.CTkToplevel):
         project_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         supplier_dir = self.scraper.name.lower()
         
-        # Construire la commande selon le statut
-        if status == 'error':
-            cmd = [
-                sys.executable,
-                os.path.join(supplier_dir, 'scraper-collect.py'),
-                '--category', self.current_category,
-                '--retry-errors-only'
-            ]
-        else:
-            # Pour pending et processing, on utilise scraper-collect.py avec filtrage par statut
-            cmd = [
-                sys.executable,
-                os.path.join(supplier_dir, 'scraper-collect.py'),
-                '--category', self.current_category,
-                '--gamme-status', status
-            ]
+        # ÉTAPE 1: Recollecte les noms des gammes en erreur
+        progress_window.add_log("=" * 50)
+        progress_window.add_log("ÉTAPE 1/2 : Recollecte des noms de gammes")
+        progress_window.add_log("=" * 50 + "\n")
+        
+        cmd1 = [
+            sys.executable,
+            os.path.join(supplier_dir, 'scraper-collect-gammes.py'),
+            '--category', self.current_category,
+            '--retry-errors-only'
+        ]
         
         progress_window.add_log(f"Répertoire: {project_dir}")
-        progress_window.add_log(f"Commande: {' '.join(cmd)}\n")
+        progress_window.add_log(f"Commande: {' '.join(cmd1)}\n")
         
-        # Exécuter le processus avec affichage en temps réel
         process = subprocess.Popen(
-            cmd,
+            cmd1,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -548,7 +665,6 @@ class ReprocessWindow(ctk.CTkToplevel):
             cwd=project_dir
         )
         
-        # Lire et afficher les logs en temps réel
         for line in iter(process.stdout.readline, ''):
             if line:
                 progress_window.add_log(line.rstrip())
@@ -556,8 +672,103 @@ class ReprocessWindow(ctk.CTkToplevel):
         process.wait()
         
         if process.returncode != 0:
-            progress_window.add_log(f"\n❌ Le script a échoué avec le code {process.returncode}")
+            progress_window.add_log(f"\n❌ Étape 1 échouée avec le code {process.returncode}")
             raise Exception(f"Le script a retourné le code d'erreur {process.returncode}")
+        
+        progress_window.add_log("\n✅ Étape 1 terminée : Noms de gammes recollectés\n")
+        
+        # ÉTAPE 2: Collecte les produits et variants des gammes qui viennent d'être recollectées
+        progress_window.add_log("=" * 50)
+        progress_window.add_log("ÉTAPE 2/2 : Collecte des produits et variants")
+        progress_window.add_log("=" * 50 + "\n")
+        
+        # Récupérer les gammes en "pending" pour cette catégorie (celles qu'on vient de recollecter)
+        db_path = get_supplier_db_path(self.scraper.name.lower())
+        db = self.db_class(db_path)
+        gammes_pending = db.get_gammes_by_status(status='pending', category=self.current_category)
+        
+        # IMPORTANT: Nettoyer les produits orphelins (sans variants) pour éviter les doublons
+        if gammes_pending:
+            progress_window.add_log("🧹 Nettoyage des produits orphelins avant recollecte...\n")
+            cleaned_total = 0
+            
+            for gamme in gammes_pending:
+                gamme_name = gamme.get('name', 'SANS NOM')
+                
+                # Supprimer uniquement les produits SANS variants (orphelins)
+                cursor = db.conn.cursor()
+                cursor.execute('''
+                    SELECT p.id, p.title 
+                    FROM products p 
+                    LEFT JOIN product_variants pv ON p.id = pv.product_id 
+                    WHERE p.gamme = ? AND pv.id IS NULL
+                ''', (gamme_name,))
+                orphans = cursor.fetchall()
+                
+                if orphans:
+                    orphan_ids = [row[0] for row in orphans]
+                    placeholders = ','.join('?' * len(orphan_ids))
+                    cursor.execute(f'DELETE FROM products WHERE id IN ({placeholders})', orphan_ids)
+                    db.conn.commit()
+                    
+                    progress_window.add_log(f"  • Gamme '{gamme_name}': {len(orphans)} produit(s) orphelin(s) supprimé(s)")
+                    cleaned_total += len(orphans)
+            
+            if cleaned_total > 0:
+                progress_window.add_log(f"\n  ✓ Total: {cleaned_total} produit(s) orphelin(s) nettoyé(s)\n")
+            else:
+                progress_window.add_log("  ✓ Aucun produit orphelin à nettoyer\n")
+        
+        db.close()
+        
+        if not gammes_pending:
+            progress_window.add_log("⚠️ Aucune gamme en 'pending' trouvée pour collecter les produits")
+            return
+        
+        progress_window.add_log(f"Gammes à traiter: {len(gammes_pending)}\n")
+        
+        # Pour chaque gamme en pending, collecter ses produits avec --gamme-url
+        for idx, gamme in enumerate(gammes_pending, 1):
+            gamme_url = gamme.get('url')
+            gamme_name = gamme.get('name', 'SANS NOM')
+            
+            progress_window.add_log(f"\n[{idx}/{len(gammes_pending)}] Collecte de la gamme: {gamme_name}")
+            progress_window.add_log(f"URL: {gamme_url}\n")
+            
+            cmd2 = [
+                sys.executable,
+                os.path.join(supplier_dir, 'scraper-collect.py'),
+                '--gamme-url', gamme_url,
+                '--category', self.current_category
+            ]
+            
+            progress_window.add_log(f"Commande: {' '.join(cmd2)}\n")
+            
+            process = subprocess.Popen(
+                cmd2,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+                cwd=project_dir
+            )
+            
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    progress_window.add_log(line.rstrip())
+            
+            process.wait()
+            
+            if process.returncode != 0:
+                progress_window.add_log(f"\n⚠️ Erreur pour la gamme {gamme_name} (code {process.returncode})")
+                # On continue avec les autres gammes même si une échoue
+            else:
+                progress_window.add_log(f"\n✓ Gamme {gamme_name} traitée avec succès")
+        
+        progress_window.add_log("\n" + "=" * 50)
+        progress_window.add_log("✅ Étape 2 terminée : Produits et variants collectés")
+        progress_window.add_log("💡 Vous pouvez maintenant cocher 'Traiter les variants PENDING' pour extraire leurs détails")
     
     def _recollect_products(self, progress_window):
         """Lance le script de re-collecte des produits en erreur."""
@@ -600,3 +811,102 @@ class ReprocessWindow(ctk.CTkToplevel):
         if process.returncode != 0:
             progress_window.add_log(f"\n❌ Le script a échoué avec le code {process.returncode}")
             raise Exception(f"Le script a retourné le code d'erreur {process.returncode}")
+    
+    def _on_exclude_errors_changed(self):
+        """Appelé quand la checkbox d'exclusion des erreurs change."""
+        # Recharger les stats pour mettre à jour l'état du bouton
+        if self.current_category:
+            self._load_stats()
+    
+    def _export_csv(self):
+        """Exporte le CSV avec option de filtrer les erreurs."""
+        if not self.current_category or not self.stats:
+            return
+        
+        try:
+            from tkinter import filedialog
+            from datetime import datetime
+            import os
+            
+            # Générer un nom de fichier par défaut
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            supplier_name = self.scraper.name.lower()
+            category_slug = self.current_category.replace(" ", "_").replace("/", "_")
+            default_filename = f"shopify_export_{supplier_name}_{category_slug}_{timestamp}.csv"
+            
+            # Demander où sauvegarder le fichier
+            filename = filedialog.asksaveasfilename(
+                title="Enregistrer le CSV",
+                defaultextension=".csv",
+                filetypes=[("Fichiers CSV", "*.csv"), ("Tous les fichiers", "*.*")],
+                initialfile=default_filename
+            )
+            
+            if not filename:
+                return  # L'utilisateur a annulé
+            
+            # Ouvrir une fenêtre de progression pour l'export
+            progress_window = ProgressWindow(
+                self,
+                title="Export CSV en cours"
+            )
+            
+            # Lancer l'export dans un thread
+            def run_export():
+                try:
+                    from apps.csv_generator.generator import CSVGenerator
+                    
+                    exclude_errors = self.exclude_errors_var.get()
+                    
+                    progress_window.add_log(f"Export CSV pour la catégorie: {self.current_category}")
+                    progress_window.add_log(f"Exclure les erreurs: {'Oui' if exclude_errors else 'Non'}\n")
+                    
+                    generator = CSVGenerator()
+                    
+                    # Déterminer les paramètres selon le scraper
+                    supplier = supplier_name
+                    categories = [self.current_category]
+                    
+                    # Pour Garnier, on peut avoir besoin de la gamme
+                    gamme = None
+                    if supplier == 'garnier':
+                        # Essayer de récupérer la gamme depuis les stats si disponible
+                        # Pour l'instant, on laisse None pour exporter toutes les gammes de la catégorie
+                        pass
+                    
+                    # Récupérer les champs par défaut depuis la config
+                    from csv_config import get_csv_config
+                    csv_config = get_csv_config()
+                    selected_fields = csv_config.get_columns(supplier)
+                    
+                    # Générer le CSV avec le filtre d'erreurs
+                    output_file = generator.generate_csv(
+                        supplier=supplier,
+                        categories=categories,
+                        subcategories=None,
+                        selected_fields=selected_fields,
+                        handle_source='sku',  # Par défaut
+                        vendor=supplier.title(),
+                        gamme=gamme,
+                        output_file=filename,
+                        exclude_errors=exclude_errors  # Nouveau paramètre
+                    )
+                    
+                    progress_window.add_log(f"\n✅ CSV exporté avec succès: {output_file}")
+                    progress_window.finish(success=True)
+                    
+                except Exception as e:
+                    import logging
+                    logger.error(f"Erreur lors de l'export CSV: {e}", exc_info=True)
+                    progress_window.add_log(f"\n❌ Erreur lors de l'export: {e}")
+                    progress_window.finish(success=False, error=str(e))
+            
+            import threading
+            thread = threading.Thread(target=run_export, daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            import logging
+            logger.error(f"Erreur lors de l'export CSV: {e}", exc_info=True)
+            import tkinter.messagebox as messagebox
+            messagebox.showerror("Erreur", f"Erreur lors de l'export CSV:\n{e}")

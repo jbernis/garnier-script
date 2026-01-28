@@ -51,6 +51,13 @@ echo -e "${GREEN}🔨 Construction de l'application...${NC}"
 python setup.py build
 echo ""
 
+# Post-build: copier l'icône personnalisée
+echo -e "${GREEN}🎨 Copie de l'icône personnalisée...${NC}"
+cd "$PROJECT_ROOT"
+"${SCRIPT_DIR}/post_build.sh"
+cd "$SCRIPT_DIR"
+echo ""
+
 # Créer le DMG
 echo -e "${GREEN}📦 Création du DMG...${NC}"
 "${SCRIPT_DIR}/build_dmg.sh"

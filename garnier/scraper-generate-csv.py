@@ -5,6 +5,7 @@ Script pour générer le CSV Shopify depuis la base de données.
 
 import sys
 import os
+import re
 import argparse
 import logging
 import pandas as pd
@@ -32,7 +33,7 @@ OUTPUT_DIR = os.getenv("GARNIER_OUTPUT_DIR", "outputs/garnier")
 
 
 def generate_csv_from_db(output_file=None, output_db='garnier_products.db', 
-                         supplier='garnier', categories=None, gamme=None, max_images=None):
+                         supplier='garnier', categories=None, gamme=None, gammes=None, max_images=None, exclude_errors=False):
     """
     Génère le CSV Shopify depuis la base de données.
     
@@ -41,12 +42,21 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
         output_db: Chemin vers la base de données SQLite
         supplier: Nom du fournisseur pour la configuration CSV
         categories: Liste de catégories à inclure (None = toutes)
-        gamme: Nom de la gamme à filtrer (None = toutes les gammes)
+        gamme: Nom de la gamme à filtrer (None = toutes les gammes, pour compatibilité)
+        gammes: Liste de gammes à filtrer (priorité sur gamme si fourni)
         max_images: Nombre maximum d'images par produit (None = toutes)
+        exclude_errors: Si True, exclut les produits avec status='error'
     """
     db = GarnierDB(output_db)
     
     try:
+        # Debug: afficher les paramètres reçus
+        logger.info(f"=== generate_csv_from_db appelée avec ===")
+        logger.info(f"  categories: {categories}")
+        logger.info(f"  gamme: {gamme}")
+        logger.info(f"  exclude_errors: {exclude_errors}")
+        logger.info(f"========================================")
+        
         # Récupérer la configuration CSV
         csv_config_manager = get_csv_config()
         shopify_columns = csv_config_manager.get_columns(supplier)
@@ -55,7 +65,8 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
         location_name = csv_config_manager.get_location(supplier)
         
         # Récupérer les produits avec leurs variants complétés (filtrés par catégorie/gamme si spécifié)
-        products = db.get_completed_products(categories=categories, gamme=gamme)
+        # Utiliser gammes si fourni, sinon gamme (pour compatibilité)
+        products = db.get_completed_products(categories=categories, gamme=gamme, gammes=gammes, exclude_errors=exclude_errors)
         
         if categories:
             logger.info(f"Filtrage par catégorie(s): {', '.join(categories)}")
@@ -95,7 +106,21 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
             
             # Récupérer les images
             images = db.get_product_images(product_id)
-            image_urls = [img['image_url'] for img in images]
+            
+            # Dédupliquer les images (certaines peuvent être dupliquées dans la DB)
+            seen_urls = set()
+            unique_images = []
+            for img in images:
+                url = img['image_url']
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    unique_images.append(url)
+            
+            image_urls = unique_images
+            
+            # Log si des doublons ont été détectés
+            if len(images) != len(image_urls):
+                logger.info(f"Produit {product_code}: {len(images)} images trouvées, {len(image_urls)} uniques (doublons supprimés)")
             
             # Limiter le nombre d'images si max_images est spécifié
             if max_images and len(image_urls) > max_images:
@@ -165,7 +190,7 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
                     'Title': formatted_title,
                     'Body (HTML)': description or '',
                     'Vendor': formatted_vendor,
-                    'Product Category': product_gamme if product_gamme else '',  # Utiliser la gamme pour Product Category si disponible
+                    'Product Category': '',  # Laisser vide pour Garnier
                     'Type': category,
                     'Tags': tags_value,  # Tags avec catégorie et gamme
                     'Published': published_value,  # FALSE si is_new, sinon TRUE
@@ -229,7 +254,66 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
                 # Créer une ligne par image
                 if image_urls:
                     for img_idx, image_url in enumerate(image_urls, 1):
-                        row = base_row.copy()
+                        if img_idx == 1:
+                            # Première image : toutes les infos de variante
+                            row = base_row.copy()
+                        else:
+                            # Images suivantes : SEULEMENT Handle + infos produit + image
+                            # Les champs de variante doivent être vides pour éviter les doublons Shopify
+                            row = {
+                                'Handle': handle or '',
+                                'Title': '',  # Vide pour les images supplémentaires
+                                'Body (HTML)': '',
+                                'Vendor': '',
+                                'Product Category': '',
+                                'Type': '',
+                                'Tags': '',
+                                'Published': '',
+                                'Option1 Name': '',
+                                'Option1 Value': '',
+                                'Option2 Name': '',
+                                'Option2 Value': '',
+                                'Option3 Name': '',
+                                'Option3 Value': '',
+                                'Variant SKU': '',
+                                'Variant Grams': '',
+                                'Variant Inventory Tracker': '',
+                                'Variant Inventory Qty': '',
+                                'Variant Inventory Policy': '',
+                                'Variant Fulfillment Service': '',
+                                'Variant Price': '',
+                                'Variant Compare At Price': '',
+                                'Variant Requires Shipping': '',
+                                'Variant Taxable': '',
+                                'Variant Barcode': '',
+                                'Variant Image': '',
+                                'Variant Weight Unit': '',
+                                'Variant Tax Code': '',
+                                'Cost per item': '',
+                                'Gift Card': '',
+                                'SEO Title': '',
+                                'SEO Description': '',
+                                'Google Shopping / Google Product Category': '',
+                                'Google Shopping / Gender': '',
+                                'Google Shopping / Age Group': '',
+                                'Google Shopping / MPN': '',
+                                'Google Shopping / Condition': '',
+                                'Google Shopping / Custom Product': '',
+                                'Included / United States': '',
+                                'Price / United States': '',
+                                'Compare At Price / United States': '',
+                                'Included / International': '',
+                                'Price / International': '',
+                                'Compare At Price / International': '',
+                                'Status': '',
+                                'location': '',
+                                'On hand (new)': '',
+                                'On hand (current)': '',
+                                'Image Src': '',
+                                'Image Position': '',
+                                'Image Alt Text': '',
+                            }
+                        
                         row['Image Src'] = image_url
                         row['Image Position'] = img_idx
                         row['Image Alt Text'] = title
@@ -257,16 +341,51 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             from garnier.scraper_garnier_module import slugify
             
+            # Debug: afficher les paramètres reçus
+            logger.info(f"Génération du nom de fichier:")
+            logger.info(f"  - categories passées en paramètre: {categories}")
+            logger.info(f"  - gamme passée en paramètre: {gamme}")
+            logger.info(f"  - nombre de produits: {len(products)}")
+            
             # Construire le nom du fichier avec catégorie et/ou gamme
+            # Format attendu: shopify_import_garnier_{categorie}_{gamme}_{timestamp}.csv
             name_parts = []
             
-            # Si une gamme est spécifiée en paramètre, l'inclure en priorité
+            # 1. Ajouter les catégories en PREMIER
+            if categories is not None and len(categories) > 0:
+                # Catégories explicitement spécifiées par l'utilisateur
+                logger.info(f"Utilisation des catégories spécifiées: {categories}")
+                category_slugs = [slugify(cat) for cat in categories]
+                name_parts.extend(category_slugs)
+            else:
+                # Détecter automatiquement les catégories présentes si "Toutes les catégories"
+                unique_categories = set()
+                for product in products:
+                    product_category = product.get('category')
+                    if product_category and product_category.strip():
+                        unique_categories.add(product_category.strip())
+                
+                logger.info(f"Catégories uniques détectées: {unique_categories}")
+                
+                # Si une seule catégorie détectée, l'ajouter au nom
+                if len(unique_categories) == 1:
+                    category_slug = slugify(list(unique_categories)[0])
+                    name_parts.append(category_slug)
+                    logger.info(f"Une seule catégorie détectée, ajout au nom: '{category_slug}'")
+                elif len(unique_categories) > 1 and len(unique_categories) <= 3:
+                    # Si 2-3 catégories, on peut les inclure toutes
+                    category_slugs = [slugify(cat) for cat in sorted(unique_categories)]
+                    name_parts.extend(category_slugs)
+                    logger.info(f"{len(unique_categories)} catégories détectées, ajout au nom")
+                # Sinon (>3 catégories), on laisse le nom générique
+            
+            # 2. Ajouter la gamme en DEUXIÈME
+            # Si une gamme est spécifiée en paramètre, l'utiliser
             if gamme:
                 gamme_slug = slugify(gamme)
                 name_parts.append(gamme_slug)
             else:
                 # Sinon, détecter automatiquement les gammes présentes dans les produits exportés
-                import re
                 unique_gammes = set()
                 for product in products:
                     product_gamme = product.get('gamme')
@@ -310,19 +429,11 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
                     name_parts.append(gamme_slug)
                     logger.info(f"Une seule gamme détectée, ajout au nom: '{gamme_slug}'")
             
-            # Ajouter les catégories si spécifiées
-            if categories and len(categories) > 0:
-                category_slugs = [slugify(cat) for cat in categories]
-                # Si on a déjà une gamme, ajouter les catégories après
-                if name_parts:
-                    name_parts.extend(category_slugs)
-                else:
-                    name_parts = category_slugs
-            
             # Construire le nom final
             if name_parts:
                 name_str = '_'.join(name_parts)
                 output_file = os.path.join(OUTPUT_DIR, f"shopify_import_garnier_{name_str}_{timestamp}.csv")
+                logger.info(f"Nom du fichier généré: {output_file}")
             else:
                 output_file = os.path.join(OUTPUT_DIR, f"shopify_import_garnier_{timestamp}.csv")
         
@@ -340,6 +451,8 @@ def generate_csv_from_db(output_file=None, output_db='garnier_products.db',
         logger.info(f"Variants: {len([v for p in products for v in db.get_product_variants(p['id']) if v['status'] == 'completed'])}")
         logger.info(f"Lignes CSV: {len(df)}")
         logger.info(f"{'='*60}")
+        
+        return output_file
         
     finally:
         db.close()

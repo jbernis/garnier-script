@@ -39,7 +39,8 @@ class CSVGenerator:
         location: Optional[str] = None,
         gamme: Optional[str] = None,
         output_file: Optional[str] = None,
-        max_images: Optional[int] = None
+        max_images: Optional[int] = None,
+        exclude_errors: bool = False
     ) -> str:
         """
         Génère un CSV Shopify avec les champs sélectionnés.
@@ -82,29 +83,15 @@ class CSVGenerator:
                 
                 db_path = get_garnier_db_path()
                 
-                # Si output_file n'est pas fourni, générer un nom de fichier
-                if not output_file:
-                    from datetime import datetime
-                    from garnier.scraper_garnier_module import slugify
-                    
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    output_dir = os.getenv("GARNIER_OUTPUT_DIR", "outputs/garnier")
-                    
-                    # Construire le nom du fichier
-                    name_parts = []
-                    if gamme:
-                        # Utiliser le nom de la gamme tel quel (déjà propre depuis l'URL)
-                        if gamme.strip():
-                            name_parts.append(slugify(gamme))
-                    if categories:
-                        category_slugs = [slugify(cat) for cat in categories]
-                        name_parts.extend(category_slugs)
-                    
-                    if name_parts:
-                        name_str = '_'.join(name_parts)
-                        output_file = os.path.join(output_dir, f"shopify_import_garnier_{name_str}_{timestamp}.csv")
-                    else:
-                        output_file = os.path.join(output_dir, f"shopify_import_garnier_{timestamp}.csv")
+                # Debug: afficher les paramètres avant l'appel
+                logger.info(f"Paramètres pour generate_csv_from_db:")
+                logger.info(f"  - categories: {categories}")
+                logger.info(f"  - gamme: {gamme}")
+                logger.info(f"  - max_images: {max_images}")
+                
+                # Ne PAS générer le nom du fichier ici, laisser generate_csv_from_db() le faire
+                # avec sa détection automatique des catégories/gammes
+                # output_file reste None pour activer la génération automatique du nom
                 
                 # Forcer le rechargement de la configuration avant la génération
                 from csv_config import get_csv_config
@@ -116,18 +103,31 @@ class CSVGenerator:
                 logger.info(f"  Colonnes chargées: {len(loaded_columns)}")
                 logger.info(f"  Premières colonnes: {loaded_columns[:5]}")
                 
-                # Appeler la fonction de génération
-                generate_csv_from_db(
-                    output_file=output_file,
-                    output_db=db_path,
-                    supplier=supplier,
-                    categories=categories,
-                    gamme=gamme,
-                    max_images=max_images
-                )
+                # Appeler la fonction de génération qui retourne le chemin du fichier
+                # Si gamme est une liste, passer comme gammes, sinon comme gamme (pour compatibilité)
+                if isinstance(gamme, list) and len(gamme) > 0:
+                    output_file = generate_csv_from_db(
+                        output_file=output_file,
+                        output_db=db_path,
+                        supplier=supplier,
+                        categories=categories,
+                        gammes=gamme,
+                        max_images=max_images,
+                        exclude_errors=exclude_errors
+                    )
+                else:
+                    output_file = generate_csv_from_db(
+                        output_file=output_file,
+                        output_db=db_path,
+                        supplier=supplier,
+                        categories=categories,
+                        gamme=gamme,
+                        max_images=max_images,
+                        exclude_errors=exclude_errors
+                    )
                 
                 # Vérifier que le fichier existe
-                if not os.path.exists(output_file):
+                if not output_file or not os.path.exists(output_file):
                     raise ValueError(f"Le fichier CSV généré n'existe pas: {output_file}")
                 
                 return output_file
@@ -146,6 +146,13 @@ class CSVGenerator:
                 
                 db_path = get_artiga_db_path()
                 
+                # Debug: afficher les paramètres avant l'appel
+                logger.info(f"[ARTIGA CSV] Paramètres avant appel generate_csv_from_db:")
+                logger.info(f"  - categories: {categories}")
+                logger.info(f"  - subcategories: {subcategories}")
+                logger.info(f"  - max_images: {max_images}")
+                logger.info(f"  - exclude_errors: {exclude_errors}")
+                
                 # Laisser scraper-generate-csv.py construire le nom du fichier
                 # Il utilisera subcategory pour le nom si fourni
                 print(f"[ARTIGA CSV] Appel avec subcategories: {subcategories}, categories: {categories}")
@@ -160,17 +167,19 @@ class CSVGenerator:
                 logger.info(f"  Colonnes chargées: {len(loaded_columns)}")
                 logger.info(f"  Premières colonnes: {loaded_columns[:5]}")
                 
-                # Appeler la fonction de génération avec subcategory
+                # Appeler la fonction de génération avec subcategories
                 # Pour Artiga, les sous-catégories sont stockées dans le champ "subcategory"
-                # Si subcategories est fourni, utiliser le premier élément comme subcategory
-                # NE PAS passer output_file pour que le script génère le nom avec subcategory
+                # Passer toutes les sous-catégories sélectionnées
+                # NE PAS passer output_file pour que le script génère le nom avec subcategories
                 output_file = generate_csv_from_db(
                     output_file=None,  # Laisser le script générer le nom
                     output_db=db_path,
                     supplier=supplier,
                     categories=categories,
-                    subcategory=subcategories[0] if subcategories and len(subcategories) > 0 else None,
-                    max_images=max_images
+                    subcategory=subcategories[0] if subcategories and len(subcategories) == 1 else None,
+                    subcategories=subcategories if subcategories and len(subcategories) > 1 else None,
+                    max_images=max_images,
+                    exclude_errors=exclude_errors
                 )
                 
                 # Vérifier que le fichier existe
@@ -207,16 +216,17 @@ class CSVGenerator:
                 logger.info(f"  Colonnes chargées: {len(loaded_columns)}")
                 logger.info(f"  Premières colonnes: {loaded_columns[:5]}")
                 
-                # Appeler la fonction de génération avec subcategory
+                # Appeler la fonction de génération avec subcategories
                 # Pour Cristel, les sous-catégories sont stockées dans le champ "subcategory"
-                # Si subcategories est fourni, utiliser le premier élément comme subcategory
-                # NE PAS passer output_file pour que le script génère le nom avec subcategory
+                # Passer toutes les sous-catégories sélectionnées
+                # NE PAS passer output_file pour que le script génère le nom avec subcategories
                 output_file = generate_csv_from_db(
                     output_file=None,  # Laisser le script générer le nom
                     output_db=db_path,
                     supplier=supplier,
                     categories=categories,
-                    subcategory=subcategories[0] if subcategories and len(subcategories) > 0 else None,
+                    subcategory=subcategories[0] if subcategories and len(subcategories) == 1 else None,
+                    subcategories=subcategories if subcategories and len(subcategories) > 1 else None,
                     max_images=max_images
                 )
                 
@@ -422,12 +432,13 @@ class CSVGenerator:
             # Garnier n'a pas de sous-catégories
             return []
     
-    def get_gammes(self, supplier: str) -> List[str]:
+    def get_gammes(self, supplier: str, category: str = None) -> List[str]:
         """
         Récupère les gammes disponibles pour un fournisseur.
         
         Args:
             supplier: Nom du fournisseur
+            category: Filtrer par catégorie (optionnel, pour Garnier uniquement)
             
         Returns:
             Liste des gammes disponibles
@@ -438,7 +449,7 @@ class CSVGenerator:
                 from utils.app_config import get_garnier_db_path
                 
                 db = GarnierDB(get_garnier_db_path())
-                gammes = db.get_available_gammes()
+                gammes = db.get_available_gammes(category=category)
                 db.close()
                 return gammes
             except Exception as e:

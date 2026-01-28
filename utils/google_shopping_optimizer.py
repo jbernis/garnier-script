@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 class GoogleShoppingOptimizer:
     """Optimiseur pour les champs Google Shopping."""
     
-    def __init__(self, ai_provider: AIProvider):
+    def __init__(self, ai_provider: AIProvider, db=None):
         self.ai_provider = ai_provider
+        self.db = db
         self.config = self._load_config()
     
     def _load_config(self) -> Dict:
@@ -175,8 +176,15 @@ class GoogleShoppingOptimizer:
                         if log_callback:
                             log_callback(f"🤖 Optimisation du champ '{field_name}' pour '{context.get('title', handle)}'...")
                         
+                        # Récupérer max_tokens depuis la configuration (par défaut 5000, mais on limite à 1000 ici)
+                        max_tokens = 1000
+                        if self.db:
+                            configured_max = self.db.get_config_int('max_tokens', default=5000)
+                            # Pour ce cas d'usage (un seul champ), on limite à 1000 même si la config est plus haute
+                            max_tokens = min(configured_max, 1000)
+                        
                         # Générer la valeur optimisée
-                        optimized_value = self.ai_provider.generate(prompt, field_context, max_tokens=200)
+                        optimized_value = self.ai_provider.generate(prompt, field_context, max_tokens=max_tokens)
                         
                         if not optimized_value:
                             continue

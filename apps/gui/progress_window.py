@@ -53,13 +53,27 @@ class ProgressWindow(ctk.CTkToplevel):
         self.progress_bar.pack(fill="x", pady=(0, 20))
         self.progress_bar.set(0)
         
+        # Zone de notification pour les erreurs (cachée par défaut)
+        self.notification_frame = ctk.CTkFrame(main_frame, fg_color=("orange", "darkorange"))
+        self.notification_label = ctk.CTkLabel(
+            self.notification_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color=("black", "white"),
+            wraplength=700,
+            justify="left"
+        )
+        self.notification_label.pack(padx=15, pady=10, fill="x")
+        # Cachée par défaut
+        self.notification_frame.pack_forget()
+        
         # Zone de logs
-        log_label = ctk.CTkLabel(
+        self.log_label = ctk.CTkLabel(
             main_frame,
             text="Logs:",
             font=ctk.CTkFont(size=14, weight="bold")
         )
-        log_label.pack(anchor="w", pady=(0, 10))
+        self.log_label.pack(anchor="w", pady=(0, 10))
         
         # Textbox pour les logs avec scrollbar
         log_frame = ctk.CTkFrame(main_frame)
@@ -162,6 +176,22 @@ class ProgressWindow(ctk.CTkToplevel):
             self.update_idletasks()
         except Exception:
             pass
+    
+    def show_diagnostic_notification(self, error_count: int):
+        """Affiche une notification recommandant le diagnostic si des erreurs sont présentes."""
+        if error_count > 0:
+            try:
+                if hasattr(self, 'notification_frame') and hasattr(self, 'notification_label') and hasattr(self, 'log_label'):
+                    self.notification_label.configure(
+                        text=f"⚠️ Attention : {error_count} produit(s) en erreur détecté(s) dans la base de données.\n"
+                             f"💡 Il est recommandé de faire un diagnostic au préalable pour identifier et corriger les erreurs."
+                    )
+                    # Afficher la notification avant la zone de logs
+                    if not self.notification_frame.winfo_viewable():
+                        self.notification_frame.pack(fill="x", padx=10, pady=(0, 10), before=self.log_label)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Erreur lors de l'affichage de la notification: {e}")
     
     def add_log(self, message: str):
         """Ajoute un message aux logs (thread-safe)."""

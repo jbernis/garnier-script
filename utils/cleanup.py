@@ -3,8 +3,10 @@ Utilitaires pour le nettoyage des fichiers générés.
 """
 
 import os
+import sys
 import shutil
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +14,7 @@ logger = logging.getLogger(__name__)
 def remove_outputs_directory(outputs_dir: str = "outputs") -> bool:
     """
     Supprime le répertoire outputs s'il existe.
+    En mode packagé, utilise ~/Library/Application Support/ScrapersShopify/outputs
     
     Args:
         outputs_dir: Chemin vers le répertoire outputs (défaut: "outputs")
@@ -22,9 +25,13 @@ def remove_outputs_directory(outputs_dir: str = "outputs") -> bool:
     try:
         # Convertir en chemin absolu si c'est un chemin relatif
         if not os.path.isabs(outputs_dir):
-            # Obtenir le répertoire de travail actuel
-            current_dir = os.getcwd()
-            outputs_dir = os.path.join(current_dir, outputs_dir)
+            if getattr(sys, "frozen", False):
+                # Mode packagé : utiliser Application Support
+                outputs_dir = str(Path.home() / "Library" / "Application Support" / "ScrapersShopify" / outputs_dir)
+            else:
+                # Mode développement : utiliser le répertoire courant
+                current_dir = os.getcwd()
+                outputs_dir = os.path.join(current_dir, outputs_dir)
         
         # Vérifier si le répertoire existe
         if os.path.exists(outputs_dir) and os.path.isdir(outputs_dir):

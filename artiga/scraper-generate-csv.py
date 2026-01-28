@@ -38,7 +38,7 @@ OUTPUT_DIR = os.getenv("ARTIGA_OUTPUT_DIR", "outputs/artiga")
 
 
 def generate_csv_from_db(output_file=None, output_db='artiga_products.db', 
-                         supplier='artiga', categories=None, subcategory=None, max_images=None):
+                         supplier='artiga', categories=None, subcategory=None, subcategories=None, max_images=None, exclude_errors=False):
     """
     Génère le CSV Shopify depuis la base de données Artiga.
     
@@ -47,7 +47,10 @@ def generate_csv_from_db(output_file=None, output_db='artiga_products.db',
         output_db: Chemin vers la base de données SQLite
         supplier: Nom du fournisseur pour la configuration CSV
         categories: Liste de catégories à inclure (None = toutes)
-        subcategory: Nom de la sous-catégorie à filtrer (None = toutes)
+        subcategory: Nom de la sous-catégorie à filtrer (None = toutes, pour compatibilité)
+        subcategories: Liste de sous-catégories à filtrer (None = toutes, prioritaire sur subcategory)
+        max_images: Nombre maximum d'images par produit (None = toutes)
+        exclude_errors: Si True, exclut les produits avec status='error'
     """
     # Charger la configuration CSV
     csv_config = get_csv_config()  # SANS argument - retourne un objet CSVConfig
@@ -61,6 +64,14 @@ def generate_csv_from_db(output_file=None, output_db='artiga_products.db',
     db = ArtigaDB(output_db)
     
     try:
+        # Debug: afficher les paramètres reçus
+        logger.info(f"=== generate_csv_from_db Artiga appelée avec ===")
+        logger.info(f"  categories: {categories}")
+        logger.info(f"  subcategory: {subcategory}")
+        logger.info(f"  subcategories: {subcategories}")
+        logger.info(f"  exclude_errors: {exclude_errors}")
+        logger.info(f"================================================")
+        
         # Récupérer la configuration CSV
         csv_config_manager = get_csv_config()
         shopify_columns = csv_config_manager.get_columns(supplier)
@@ -69,11 +80,13 @@ def generate_csv_from_db(output_file=None, output_db='artiga_products.db',
         location_name = csv_config_manager.get_location(supplier)
         
         # Récupérer les produits avec leurs variants complétés
-        products = db.get_completed_products(categories=categories, subcategory=subcategory)
+        products = db.get_completed_products(categories=categories, subcategory=subcategory, subcategories=subcategories, exclude_errors=exclude_errors)
         
         if categories:
             logger.info(f"Filtrage par catégorie(s): {', '.join(categories)}")
-        if subcategory:
+        if subcategories and len(subcategories) > 0:
+            logger.info(f"Filtrage par sous-catégorie(s): {', '.join(subcategories)}")
+        elif subcategory:
             logger.info(f"Filtrage par sous-catégorie: {subcategory}")
         
         if not products:
@@ -255,8 +268,13 @@ def generate_csv_from_db(output_file=None, output_db='artiga_products.db',
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             
             # Inclure la catégorie et/ou sous-catégorie dans le nom du fichier
-            # Si une sous-catégorie est fournie, extraire aussi la catégorie du premier produit
-            if subcategory and products:
+            # Gérer plusieurs sous-catégories (priorité sur subcategory)
+            if subcategories and len(subcategories) > 0:
+                logger.info(f"Construction du nom avec {len(subcategories)} sous-catégorie(s): {', '.join(subcategories)}")
+                subcategory_slugs = [slugify(subcat) for subcat in subcategories]
+                subcategories_str = '_'.join(subcategory_slugs)
+                filename = f"shopify_import_artiga_{subcategories_str}_{timestamp}.csv"
+            elif subcategory and products:
                 first_product_category = products[0].get('category', '')
                 if first_product_category:
                     logger.info(f"Construction du nom avec catégorie-sous-catégorie: {first_product_category} - {subcategory}")
@@ -267,10 +285,16 @@ def generate_csv_from_db(output_file=None, output_db='artiga_products.db',
                     logger.info(f"Construction du nom avec sous-catégorie: {subcategory}")
                     subcategory_slug = slugify(subcategory)
                     filename = f"shopify_import_artiga_{subcategory_slug}_{timestamp}.csv"
-            elif categories and len(categories) == 1:
-                logger.info(f"Construction du nom avec catégorie: {categories[0]}")
-                category_slug = slugify(categories[0])
-                filename = f"shopify_import_artiga_{category_slug}_{timestamp}.csv"
+            elif categories and len(categories) > 0:
+                if len(categories) == 1:
+                    logger.info(f"Construction du nom avec catégorie: {categories[0]}")
+                    category_slug = slugify(categories[0])
+                    filename = f"shopify_import_artiga_{category_slug}_{timestamp}.csv"
+                else:
+                    logger.info(f"Construction du nom avec {len(categories)} catégories: {', '.join(categories)}")
+                    category_slugs = [slugify(cat) for cat in categories]
+                    categories_str = '_'.join(category_slugs)
+                    filename = f"shopify_import_artiga_{categories_str}_{timestamp}.csv"
             else:
                 logger.info("Construction du nom générique (toutes les catégories)")
                 filename = f"shopify_import_artiga_{timestamp}.csv"
@@ -333,7 +357,12 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--subcategory', '-s',
-        help='Sous-catégorie à filtrer'
+        help='Sous-catégorie à filtrer (une seule, pour compatibilité)'
+    )
+    parser.add_argument(
+        '--subcategories',
+        nargs='+',
+        help='Sous-catégories à filtrer (plusieurs)'
     )
     parser.add_argument(
         '--list-categories',
@@ -365,7 +394,8 @@ if __name__ == '__main__':
         output_db=output_db,
         supplier=args.supplier,
         categories=args.category,
-        subcategory=args.subcategory
+        subcategory=args.subcategory,
+        subcategories=args.subcategories
     )
     
     logger.info("Script terminé avec succès")
