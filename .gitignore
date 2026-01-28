@@ -1,42 +1,140 @@
-# Fichier CSV généré
+# ============================================
+# FICHIERS GÉNÉRÉS (NE PAS VERSIONNER)
+# ============================================
+
+# Bases de données générées
+database/*.db
+database/*.db-journal
+database/*.db-wal
+database/*.db-shm
+
+# Fichiers CSV générés
+outputs/
 shopify_import*.csv
+*.csv
+
+# Images téléchargées
 images/
 
-# Python
+# ============================================
+# PYTHON
+# ============================================
+
+# Bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
+
+# Environnements virtuels
 env/
 venv/
 ENV/
 .venv
+venv.bak/
 
-# IDE
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.spec.backup
+creation-build/build/
+creation-build/dist/
+*.app
+*.dmg
+
+# ============================================
+# CREDENTIALS & CONFIG
+# ============================================
+
+# Variables d'environnement (credentials sensibles)
+.env
+
+# Mais garder l'exemple
+!.env.example
+
+# ============================================
+# IDE & EDITORS
+# ============================================
+
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.project
+.pydevproject
+.settings/
 
+# ============================================
 # OS
+# ============================================
+
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+Desktop.ini
 
-# Logs
+# ============================================
+# LOGS & TEMPORARY
+# ============================================
+
 *.log
+*.tmp
+*.temp
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Variables d'environnement (credentials)
-.env
+# ============================================
+# DOCUMENTATION (optionnel, décommenter si tu ne veux pas les versionner)
+# ============================================
 
-# Configuration de l'application (commenté pour inclure dans GitHub)
-# app_config.json
+# README.md
+# RESUME_*.md
+# BUILD_*.md
+# *.txt (attention, cela exclut requirements.txt aussi!)
 
-# PyInstaller
-build/
-dist/
-*.app
-*.dmg
-# Note: creation-build/build.spec est nécessaire, donc on ne l'exclut pas
+# ============================================
+# FICHIERS À GARDER (ESSENTIELS)
+# ============================================
 
+# requirements.txt - TOUJOURS inclus
+!requirements.txt
+
+# Scripts essentiels
+!run_gui.py
+!run_gui.sh
+!scraper-*.py
+
+# Fichiers de configuration PyInstaller
+!creation-build/build.spec
+!creation-build/*.sh
+!creation-build/*.icns
+
+# Structure de base des dossiers database (mais pas les .db)
+!database/.gitkeep
+
+# Google taxonomy
+!google_taxonomy.txt

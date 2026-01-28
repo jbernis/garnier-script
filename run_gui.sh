@@ -36,10 +36,27 @@ log_debug() {
 
 # Vérifier Python EN PREMIER (avant tout)
 log_info "Vérification de Python..."
-if command -v python3 &> /dev/null; then
-    PYTHON_VERSION=$(python3 --version)
-    PYTHON_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)" 2>/dev/null)
-    PYTHON_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
+
+# Détecter le meilleur Python disponible (priorité à 3.12+)
+if command -v python3.12 &> /dev/null; then
+    PYTHON_CMD="python3.12"
+elif [ -f "/usr/local/bin/python3.12" ]; then
+    PYTHON_CMD="/usr/local/bin/python3.12"
+elif [ -f "/opt/homebrew/bin/python3.12" ]; then
+    PYTHON_CMD="/opt/homebrew/bin/python3.12"
+elif command -v python3 &> /dev/null; then
+    PYTHON_CMD="python3"
+else
+    log_error "Python 3 non trouvé"
+    exit 1
+fi
+
+log_debug "Utilisation de: $PYTHON_CMD"
+
+if command -v $PYTHON_CMD &> /dev/null; then
+    PYTHON_VERSION=$($PYTHON_CMD --version)
+    PYTHON_MAJOR=$($PYTHON_CMD -c "import sys; print(sys.version_info.major)" 2>/dev/null)
+    PYTHON_MINOR=$($PYTHON_CMD -c "import sys; print(sys.version_info.minor)" 2>/dev/null)
     
     if [ -z "$PYTHON_MAJOR" ] || [ -z "$PYTHON_MINOR" ]; then
         log_warning "Impossible de déterminer la version exacte de Python"
@@ -89,19 +106,19 @@ source venv/bin/activate
 log_info "Vérification des dépendances..."
 MISSING_DEPS=0
 
-python3 -c "import customtkinter" 2>/dev/null
+$PYTHON_CMD -c "import customtkinter" 2>/dev/null
 if [ $? -ne 0 ]; then
     log_warning "customtkinter n'est pas installé"
     MISSING_DEPS=1
 fi
 
-python3 -c "import selenium" 2>/dev/null
+$PYTHON_CMD -c "import selenium" 2>/dev/null
 if [ $? -ne 0 ]; then
     log_warning "selenium n'est pas installé"
     MISSING_DEPS=1
 fi
 
-python3 -c "import pandas" 2>/dev/null
+$PYTHON_CMD -c "import pandas" 2>/dev/null
 if [ $? -ne 0 ]; then
     log_warning "pandas n'est pas installé"
     MISSING_DEPS=1
@@ -110,7 +127,7 @@ fi
 if [ $MISSING_DEPS -eq 1 ]; then
     log_warning "Certaines dépendances manquent"
     log_info "Installation des dépendances manquantes..."
-    python3 -m pip install -r requirements.txt --quiet
+    $PYTHON_CMD -m pip install -r requirements.txt --quiet
     if [ $? -eq 0 ]; then
         log_success "Dépendances installées"
     else
@@ -128,7 +145,7 @@ log_debug "Les logs s'afficheront ci-dessous..."
 echo ""
 
 # Lancer le script Python qui gère les logs
-python3 run_gui.py
+$PYTHON_CMD run_gui.py
 
 # Code de sortie
 EXIT_CODE=$?

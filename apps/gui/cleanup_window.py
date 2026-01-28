@@ -305,8 +305,8 @@ class CleanupWindow(ctk.CTkToplevel):
                 self.options_frame,
                 variable=self.subcategory_var,
                 width=400,
-                state="disabled",
-                command=self.on_category_changed
+                state="disabled"
+                # Pas de command ici, sinon ça recharge la liste lors de la sélection
             )
             self.subcategory_dropdown.pack(anchor="w", padx=40, pady=(0, 10))
         
@@ -448,13 +448,18 @@ class CleanupWindow(ctk.CTkToplevel):
             return
         
         try:
+            self.log(f"DEBUG: load_subcategories appelée avec category='{category}'")
             subcategories = self.db.get_available_subcategories(category)
+            self.log(f"DEBUG: Sous-catégories récupérées: {subcategories}")
+            
             if subcategories:
                 self.subcategory_dropdown.configure(values=subcategories)
                 self.subcategory_var.set(subcategories[0] if subcategories else "")
+                self.log(f"DEBUG: Liste mise à jour avec {len(subcategories)} sous-catégories")
             else:
                 self.subcategory_dropdown.configure(values=["Aucune sous-catégorie"])
                 self.subcategory_var.set("Aucune sous-catégorie")
+                self.log(f"DEBUG: Aucune sous-catégorie trouvée")
         except Exception as e:
             self.log(f"Erreur lors du chargement des sous-catégories: {e}")
     
@@ -801,6 +806,14 @@ class CleanupWindow(ctk.CTkToplevel):
             
             elif mode == "subcategory":
                 subcategory = self.subcategory_var.get()
+                self.log(f"DEBUG: Mode subcategory, valeur = '{subcategory}'")
+                
+                if not subcategory or subcategory == "Aucune sous-catégorie":
+                    self.log(f"✗ ERREUR: Sous-catégorie vide ou invalide: '{subcategory}'")
+                    messagebox.showerror("Erreur", "Veuillez sélectionner une sous-catégorie valide")
+                    return
+                
+                self.log(f"Appel de delete_by_subcategory('{subcategory}')...")
                 deleted_count = self.db.delete_by_subcategory(subcategory)
                 self.log(f"✓ Sous-catégorie '{subcategory}' supprimée ({deleted_count} produits)")
             

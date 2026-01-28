@@ -67,6 +67,18 @@ extra_data_files = [
     ('garnier/scraper-generate-csv.py', 'garnier'),
     ('garnier/scraper-gamme.py', 'garnier'),
     ('garnier/query_product.py', 'garnier'),
+    # Scripts Artiga
+    ('artiga/scraper-collect.py', 'artiga'),
+    ('artiga/scraper-process.py', 'artiga'),
+    ('artiga/scraper-generate-csv.py', 'artiga'),
+    ('artiga/scraper-subcategory.py', 'artiga'),
+    # Scripts Cristel
+    ('cristel/scraper-collect.py', 'cristel'),
+    ('cristel/scraper-process.py', 'cristel'),
+    ('cristel/scraper-generate-csv.py', 'cristel'),
+    ('cristel/scraper-subcategory.py', 'cristel'),
+    ('cristel/query_product.py', 'cristel'),
+    ('artiga/query_product.py', 'artiga'),
 ]
 
 for rel_path, dest_dir in extra_data_files:

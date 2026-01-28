@@ -5,6 +5,7 @@ Structure inspirée de l'onglet Test (apps/ai_editor/gui/window.py).
 """
 
 import customtkinter as ctk
+import tkinter as tk
 import logging
 from apps.ai_editor.db import AIPromptsDB
 
@@ -31,8 +32,27 @@ class TaxonomyWindow(ctk.CTkFrame):
         )
         title.pack(pady=(20, 10))
         
-        # Créer directement l'onglet Règles (plus besoin d'onglets)
+        # Bouton de recherche en dessous du titre
+        search_button = ctk.CTkButton(
+            self,
+            text="🔍 Rechercher une Catégorie",
+            command=self.open_search_window,
+            width=250,
+            height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="blue",
+            hover_color="darkblue"
+        )
+        search_button.pack(pady=(0, 10))
+        
+        # Créer le système d'onglets (maintenant seulement Règles)
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Onglet Règles
+        self.rules_tab = self.tabview.add("📋 Règles Type → Catégorie")
         self.create_rules_tab()
+    
     
     def _force_uppercase_type(self, event=None):
         """Convertit automatiquement le texte du champ de type en majuscules."""
@@ -53,7 +73,7 @@ class TaxonomyWindow(ctk.CTkFrame):
         """Crée l'interface de gestion des règles Type → Catégorie."""
         
         # Frame scrollable
-        rules_scroll = ctk.CTkScrollableFrame(self)
+        rules_scroll = ctk.CTkScrollableFrame(self.rules_tab)
         rules_scroll.pack(fill="both", expand=True, padx=10, pady=10)
         
         # ===== SECTION RÈGLES ACTIVES =====
@@ -774,3 +794,316 @@ class TaxonomyWindow(ctk.CTkFrame):
                 text=f"❌ Erreur: {e}",
                 text_color="red"
             )
+    
+    # ========== RECHERCHE DE CATÉGORIES ==========
+    
+    def open_search_window(self):
+        """Ouvre une fenêtre popup pour la recherche."""
+        # Créer une fenêtre TopLevel (fenêtre indépendante)
+        search_window = ctk.CTkToplevel(self)
+        search_window.title("🔍 Recherche de Catégories")
+        search_window.geometry("900x600")
+        
+        # Centrer la fenêtre
+        search_window.update_idletasks()
+        x = (search_window.winfo_screenwidth() // 2) - (900 // 2)
+        y = (search_window.winfo_screenheight() // 2) - (600 // 2)
+        search_window.geometry(f"900x600+{x}+{y}")
+        
+        # Frame pour les notifications (en haut, caché par défaut)
+        notification_frame = ctk.CTkFrame(
+            search_window,
+            fg_color="green",
+            corner_radius=8
+        )
+        # On ne pack pas encore, il apparaîtra seulement lors de la copie
+        
+        notification_label = ctk.CTkLabel(
+            notification_frame,
+            text="",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="white"
+        )
+        notification_label.pack(padx=20, pady=10)
+        
+        # Titre
+        title = ctk.CTkLabel(
+            search_window,
+            text="🔍 Recherche de Catégories Google Shopping",
+            font=ctk.CTkFont(size=18, weight="bold")
+        )
+        title.pack(pady=(20, 10))
+        
+        # Frame de recherche
+        search_frame = ctk.CTkFrame(search_window)
+        search_frame.pack(fill="x", padx=20, pady=(0, 10))
+        
+        search_label = ctk.CTkLabel(search_frame, text="Rechercher:", font=ctk.CTkFont(size=14))
+        search_label.pack(side="left", padx=10)
+        
+        # Entry avec StringVar
+        search_var = ctk.StringVar()
+        search_entry = ctk.CTkEntry(
+            search_frame,
+            textvariable=search_var,
+            placeholder_text="Ex: nappes, serviettes, linge de table...",
+            font=ctk.CTkFont(size=14),
+            height=40
+        )
+        search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        # Label de statut
+        status_label = ctk.CTkLabel(
+            search_window,
+            text="Tapez un mot-clé pour rechercher des catégories...",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        status_label.pack(padx=20, pady=(0, 10))
+        
+        # Frame pour les résultats
+        results_frame = ctk.CTkFrame(search_window)
+        results_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        
+        # En-tête
+        header_frame = ctk.CTkFrame(results_frame)
+        header_frame.pack(fill="x", padx=10, pady=(10, 5))
+        
+        ctk.CTkLabel(header_frame, text="Code", font=ctk.CTkFont(size=12, weight="bold"), width=100).pack(side="left", padx=10)
+        ctk.CTkLabel(header_frame, text="Catégorie", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", fill="x", expand=True, padx=10)
+        
+        # Liste des résultats
+        results_scroll = ctk.CTkScrollableFrame(results_frame, height=400)
+        results_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        # Fonction pour afficher une notification
+        def show_notification(message, duration=2000):
+            """Affiche une notification temporaire en haut de la fenêtre."""
+            notification_label.configure(text=message)
+            notification_frame.pack(fill="x", padx=20, pady=(10, 0), before=title)
+            
+            # Cacher après duration ms
+            def hide():
+                try:
+                    notification_frame.pack_forget()
+                except:
+                    pass
+            
+            search_window.after(duration, hide)
+        
+        # Fonction de recherche
+        def on_search(event=None):
+            search_text = search_var.get().strip()
+            
+            # Effacer anciens résultats
+            for widget in results_scroll.winfo_children():
+                widget.destroy()
+            
+            if not search_text:
+                status_label.configure(text="Tapez un mot-clé...", text_color="gray")
+                return
+            
+            # Rechercher
+            results = self.search_categories(search_text)
+            
+            if not results:
+                status_label.configure(text=f"❌ Aucun résultat pour '{search_text}'", text_color="red")
+                ctk.CTkLabel(results_scroll, text="Aucune catégorie trouvée", text_color="gray").pack(pady=20)
+                return
+            
+            # Afficher résultats (passer la fonction de notification)
+            for result in results:
+                self.create_result_card(result, results_scroll, show_notification)
+            
+            status_text = f"✅ {len(results)} catégorie(s) trouvée(s)"
+            if len(results) >= 100:
+                status_text += " (limite atteinte)"
+            status_label.configure(text=status_text, text_color="green" if len(results) < 100 else "orange")
+        
+        search_entry.bind("<KeyRelease>", on_search)
+        search_entry.focus()
+        
+        logger.info("✅ Fenêtre de recherche ouverte")
+        
+        # En-tête des résultats
+        header_frame = ctk.CTkFrame(results_frame)
+        header_frame.pack(fill="x", padx=10, pady=(10, 5))
+        
+        code_header = ctk.CTkLabel(
+            header_frame,
+            text="Code",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=100
+        )
+        code_header.pack(side="left", padx=10)
+        
+        path_header = ctk.CTkLabel(
+            header_frame,
+            text="Catégorie",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        path_header.pack(side="left", fill="x", expand=True, padx=10)
+        
+        # Liste scrollable des résultats
+        self.results_scroll = ctk.CTkScrollableFrame(results_frame, height=400)
+        self.results_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    
+    def on_search_text_changed(self, search_text):
+        """Appelé quand le texte de recherche change (recherche instantanée)."""
+        
+        if not search_text:
+            # Effacer les résultats si la recherche est vide
+            for widget in self.results_scroll.winfo_children():
+                widget.destroy()
+            self.search_status_label.configure(
+                text="Tapez un mot-clé pour rechercher des catégories...",
+                text_color="gray"
+            )
+            return
+        
+        # Rechercher dans la taxonomie
+        results = self.search_categories(search_text)
+        has_more = len(results) >= 100  # Limite par défaut
+        
+        # Effacer les anciens résultats
+        for widget in self.results_scroll.winfo_children():
+            widget.destroy()
+        
+        if not results:
+            no_results_label = ctk.CTkLabel(
+                self.results_scroll,
+                text=f"Aucune catégorie trouvée pour '{search_text}'",
+                font=ctk.CTkFont(size=12),
+                text_color="gray"
+            )
+            no_results_label.pack(pady=20)
+            self.search_status_label.configure(
+                text=f"❌ Aucun résultat pour '{search_text}'",
+                text_color="red"
+            )
+            return
+        
+        # Afficher les résultats
+        for result in results:
+            self.create_result_card(result)
+        
+        # Message de statut avec indication si limite atteinte
+        status_text = f"✅ {len(results)} catégorie(s) trouvée(s)"
+        if has_more:
+            status_text += " (limite de 100 résultats atteinte, affinez votre recherche)"
+        
+        self.search_status_label.configure(
+            text=status_text,
+            text_color="green" if not has_more else "orange"
+        )
+    
+    def search_categories(self, search_text: str, limit: int = 100) -> list:
+        """
+        Recherche des catégories dans google_taxonomy par mot-clé.
+        
+        Args:
+            search_text: Texte à rechercher
+            limit: Nombre maximum de résultats
+            
+        Returns:
+            Liste de dictionnaires avec 'code' et 'path'
+        """
+        try:
+            cursor = self.db.conn.cursor()
+            
+            # Recherche insensible à la casse avec LIKE
+            # Recherche dans le chemin complet
+            search_pattern = f'%{search_text}%'
+            
+            cursor.execute('''
+                SELECT code, path 
+                FROM google_taxonomy 
+                WHERE LOWER(path) LIKE LOWER(?)
+                ORDER BY 
+                    CASE 
+                        WHEN LOWER(path) LIKE LOWER(?) THEN 1  -- Correspondance au début
+                        WHEN LOWER(path) LIKE LOWER(?) THEN 2  -- Correspondance au début d'un mot
+                        ELSE 3  -- Autres correspondances
+                    END,
+                    LENGTH(path) ASC
+                LIMIT ?
+            ''', (
+                search_pattern,  # Pour le WHERE
+                f'{search_text}%',  # Pour le tri (début exact)
+                f'% {search_text}%',  # Pour le tri (début de mot)
+                limit
+            ))
+            
+            results = []
+            for row in cursor.fetchall():
+                results.append({
+                    'code': row['code'],
+                    'path': row['path']
+                })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Erreur lors de la recherche: {e}", exc_info=True)
+            return []
+    
+    def create_result_card(self, result, parent_frame=None, notification_callback=None):
+        """Crée une carte pour afficher un résultat de recherche."""
+        if parent_frame is None:
+            parent_frame = self.results_scroll
+        card = ctk.CTkFrame(parent_frame)
+        card.pack(fill="x", pady=2, padx=5)
+        
+        # Frame pour le contenu
+        content_frame = ctk.CTkFrame(card)
+        content_frame.pack(fill="x", padx=8, pady=6)
+        
+        # Code avec bouton de copie
+        code_frame = ctk.CTkFrame(content_frame)
+        code_frame.pack(side="left", padx=(5, 10))
+        
+        code_label = ctk.CTkLabel(
+            code_frame,
+            text=result['code'],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            width=90,
+            anchor="w"
+        )
+        code_label.pack(side="left", padx=8)
+        
+        # Bouton pour copier le code
+        def copy_code(code):
+            # Obtenir la fenêtre racine pour accéder au presse-papiers
+            root = self.winfo_toplevel()
+            root.clipboard_clear()
+            root.clipboard_append(code)
+            root.update()
+            # Feedback visuel sur le bouton
+            copy_btn.configure(text="✓", fg_color="green")
+            self.after(1000, lambda: copy_btn.configure(text="📋", fg_color="gray"))
+            # Afficher la notification si disponible
+            if notification_callback:
+                notification_callback(f"✅ Code {code} copié dans le presse-papiers !")
+        
+        copy_btn = ctk.CTkButton(
+            code_frame,
+            text="📋",
+            command=lambda: copy_code(result['code']),
+            width=35,
+            height=25,
+            fg_color="gray",
+            hover_color="darkgray",
+            font=ctk.CTkFont(size=11)
+        )
+        copy_btn.pack(side="left", padx=(0, 5))
+        
+        # Chemin de la catégorie
+        path_label = ctk.CTkLabel(
+            content_frame,
+            text=result['path'],
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+            justify="left",
+            wraplength=700
+        )
+        path_label.pack(side="left", fill="x", expand=True, padx=10)

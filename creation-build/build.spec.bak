@@ -74,8 +74,14 @@ for rel_path, dest_dir in extra_data_files:
     if os.path.exists(src_path):
         datas.append((src_path, dest_dir))
 
-# Créer le répertoire database dans le bundle (les fichiers .db seront créés à l'exécution)
-# On inclut juste la structure de répertoire si nécessaire
+
+# Inclure les bases de données existantes (seront copiées dans Application Support au premier lancement)
+database_files = ['garnier_products.db', 'artiga_products.db', 'cristel_products.db', 'ai_prompts.db']
+for db_file in database_files:
+    db_path = os.path.join(work_dir, 'database', db_file)
+    if os.path.exists(db_path):
+        datas.append((db_path, 'database'))
+        print(f"✓ Base de données incluse: {db_file}")
 
 a = Analysis(
     [run_gui_path],  # Point d'entrée principal (chemin absolu)

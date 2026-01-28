@@ -851,13 +851,30 @@ class ArtigaDB:
         """
         cursor = self.conn.cursor()
         
+        logger.info(f"[DELETE_SUBCATEGORY] Recherche des produits avec subcategory = '{subcategory}'")
+        
         # Compter les produits avant suppression
         cursor.execute('SELECT COUNT(*) FROM products WHERE subcategory = ?', (subcategory,))
         count = cursor.fetchone()[0]
+        logger.info(f"[DELETE_SUBCATEGORY] Trouvé {count} produits à supprimer")
+        
+        # Afficher quelques exemples de produits trouvés
+        if count > 0:
+            cursor.execute('SELECT id, title, subcategory FROM products WHERE subcategory = ? LIMIT 3', (subcategory,))
+            examples = cursor.fetchall()
+            for ex in examples:
+                logger.info(f"[DELETE_SUBCATEGORY] Exemple: ID={ex[0]}, Title={ex[1]}, Subcategory={ex[2]}")
         
         # Supprimer (CASCADE va supprimer les variants et images)
+        logger.info(f"[DELETE_SUBCATEGORY] Exécution de DELETE FROM products WHERE subcategory = '{subcategory}'")
         cursor.execute('DELETE FROM products WHERE subcategory = ?', (subcategory,))
         self.conn.commit()
+        logger.info(f"[DELETE_SUBCATEGORY] Commit effectué")
+        
+        # Vérifier que c'est bien supprimé
+        cursor.execute('SELECT COUNT(*) FROM products WHERE subcategory = ?', (subcategory,))
+        remaining = cursor.fetchone()[0]
+        logger.info(f"[DELETE_SUBCATEGORY] Produits restants après suppression: {remaining}")
         
         logger.info(f"Sous-catégorie '{subcategory}' supprimée: {count} produits")
         

@@ -6,7 +6,12 @@ Script pour lancer l'interface graphique avec logs défilantes dans le terminal.
 import sys
 import os
 import logging
+import warnings
 from datetime import datetime
+
+# Filtrer les warnings macOS Tkinter non critiques
+warnings.filterwarnings('ignore', message='.*Expected min height of view.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='tkinter')
 
 # Créer un handler pour afficher dans le terminal avec couleurs
 class ColoredFormatter(logging.Formatter):
