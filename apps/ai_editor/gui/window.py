@@ -3789,7 +3789,7 @@ class AIEditorWindow(ctk.CTkToplevel):
         search_label.pack(side="left", padx=(10, 5))
         
         self.visualizer_search_var = ctk.StringVar()
-        self.visualizer_search_var.trace('w', self.on_visualizer_search_changed)
+        self.visualizer_search_var.trace_add('write', self.on_visualizer_search_changed)
         self.visualizer_search_entry = ctk.CTkEntry(
             search_input_frame,
             textvariable=self.visualizer_search_var,
