@@ -108,33 +108,71 @@ Desktop.ini
 htmlcov/
 
 # ============================================
-# DOCUMENTATION (optionnel, décommenter si tu ne veux pas les versionner)
+# DOCUMENTATION & FICHIERS NON-PRODUCTION
 # ============================================
 
-# README.md
-# RESUME_*.md
-# BUILD_*.md
-# *.txt (attention, cela exclut requirements.txt aussi!)
+# Tous les fichiers Markdown (documentation)
+*.md
+
+# Scripts de test
+test_*.py
+check_*.py
+*_test.py
+tests/
+
+# Scripts temporaires et de développement (ne pas versionner)
+create_launcher.sh
+create_dock_launcher.sh
+clean_git_cache.sh
+git_push.sh
+push_*.sh
+install.sh
+vider-base-*.sh
+update_*.sh
+migration_*.py
+fix_*.py
+
+# Fichiers de backup et temporaires
+*.bak
+*.backup
+*.old
+*.tmp
 
 # ============================================
-# FICHIERS À GARDER (ESSENTIELS)
+# FICHIERS À GARDER (ESSENTIELS POUR LA PRODUCTION)
 # ============================================
 
-# requirements.txt - TOUJOURS inclus
+# Dépendances Python - CRITIQUE
 !requirements.txt
 
-# Scripts essentiels
+# Scripts de lancement - ESSENTIELS
 !run_gui.py
 !run_gui.sh
+
+# Scripts de scraping - ESSENTIELS
 !scraper-*.py
 
-# Fichiers de configuration PyInstaller
+# Scripts Garnier (sous-dossier garnier/)
+!garnier/scraper-*.py
+
+# Scripts Artiga (sous-dossier artiga/)
+!artiga/scraper-*.py
+
+# Scripts Cristel (sous-dossier cristel/)
+!cristel/scraper-*.py
+
+# Fichiers de build PyInstaller
 !creation-build/build.spec
-!creation-build/*.sh
+!creation-build/build_all.sh
+!creation-build/post_build.sh
 !creation-build/*.icns
 
-# Structure de base des dossiers database (mais pas les .db)
+# Structure de base des dossiers
 !database/.gitkeep
+!outputs/.gitkeep
 
-# Google taxonomy
+# Google taxonomy - ESSENTIEL pour la taxonomie produits
 !google_taxonomy.txt
+
+# Exemple de configuration
+!.env.example
