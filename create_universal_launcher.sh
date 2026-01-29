@@ -94,13 +94,13 @@ SCRIPT_PID=$!
 # Attendre que le processus Python démarre
 sleep 3
 
-# Trouver le PID du processus Python (run_gui.py)
-PYTHON_PID=$(pgrep -f "run_gui.py" | head -1)
+# Trouver le PID du processus Python (compatible macOS Monterey et plus)
+PYTHON_PID=$(ps aux | grep "[r]un_gui.py" | awk '{print $2}' | head -1)
 
 # Si Python tourne, attendre qu'il se termine pour garder l'app dans le Dock
-if [ -n "$PYTHON_PID" ]; then
+if [ -n "$PYTHON_PID" ] && [ "$PYTHON_PID" != "" ]; then
     # Attendre que le processus Python se termine
-    while kill -0 "$PYTHON_PID" 2>/dev/null; do
+    while ps -p "$PYTHON_PID" > /dev/null 2>&1; do
         sleep 2
     done
 fi
