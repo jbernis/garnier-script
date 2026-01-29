@@ -202,6 +202,15 @@ def main():
         # Créer et lancer l'application
         app = MainWindow()
         
+        # Définir l'icône personnalisée de l'application (pour le Dock macOS)
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), "creation-build", "app_icon.icns")
+            if os.path.exists(icon_path) and sys.platform == "darwin":
+                # Sur macOS, utiliser iconbitmap avec le fichier .icns
+                app.iconbitmap(icon_path)
+        except Exception as e:
+            logger.debug(f"Impossible de définir l'icône personnalisée: {e}")
+        
         # Forcer la fenêtre au premier plan immédiatement après création
         app.update_idletasks()
         app.bring_to_front()
