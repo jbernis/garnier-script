@@ -108,6 +108,9 @@ class AIPromptsDB:
             )
         ''')
         
+        # Migration: Ajouter les colonnes manquantes à csv_rows si nécessaire
+        self._migrate_csv_rows_table(cursor)
+        
         # Table des changements de champs
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS product_field_changes (
@@ -298,6 +301,42 @@ class AIPromptsDB:
         
         self.conn.commit()
         logger.info(f"Base de données initialisée: {self.db_path}")
+    
+    def _migrate_csv_rows_table(self, cursor):
+        """
+        Migration: Ajoute les colonnes status, error_message, et ai_explanation 
+        à la table csv_rows si elles n'existent pas.
+        """
+        # Vérifier les colonnes existantes
+        cursor.execute("PRAGMA table_info(csv_rows)")
+        existing_columns = [column[1] for column in cursor.fetchall()]
+        
+        # Ajouter status si manquante
+        if 'status' not in existing_columns:
+            logger.info("Migration: Ajout de la colonne 'status' à csv_rows")
+            cursor.execute('''
+                ALTER TABLE csv_rows 
+                ADD COLUMN status TEXT DEFAULT 'pending'
+            ''')
+        
+        # Ajouter error_message si manquante
+        if 'error_message' not in existing_columns:
+            logger.info("Migration: Ajout de la colonne 'error_message' à csv_rows")
+            cursor.execute('''
+                ALTER TABLE csv_rows 
+                ADD COLUMN error_message TEXT
+            ''')
+        
+        # Ajouter ai_explanation si manquante
+        if 'ai_explanation' not in existing_columns:
+            logger.info("Migration: Ajout de la colonne 'ai_explanation' à csv_rows")
+            cursor.execute('''
+                ALTER TABLE csv_rows 
+                ADD COLUMN ai_explanation TEXT
+            ''')
+        
+        self.conn.commit()
+        logger.info("Migration csv_rows: terminée avec succès")
     
     # ========== Gestion des prompts ==========
     

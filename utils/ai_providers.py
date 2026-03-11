@@ -754,12 +754,12 @@ class GeminiProvider(AIProvider):
         if not model_lower.startswith('gemini-'):
             return False
         
-        # 3. GARDER les versions récentes (2.0+, 2.5+, 3.0+)
-        # Retirer les anciennes versions (1.0, 1.5)
-        if any(version in model_lower for version in ['gemini-2.0', 'gemini-2.5', 'gemini-3.0', 'gemini-3.']):
+        # 3. GARDER uniquement les versions STABLES et FONCTIONNELLES (2.0, 2.5)
+        # Retirer les anciennes versions (1.0, 1.5) et les versions 3.x en preview non fonctionnelles
+        if any(version in model_lower for version in ['gemini-2.0', 'gemini-2.5']):
             # Vérifier que c'est bien un modèle de génération (flash ou pro)
             if 'flash' in model_lower or 'pro' in model_lower or 'exp' in model_lower:
-                # Retirer les variantes trop spécifiques
+                # Retirer les variantes trop spécifiques ou preview non fonctionnelles
                 if any(variant in model_lower for variant in ['-lite-preview', '-lite-001']):
                     return False
                 return True

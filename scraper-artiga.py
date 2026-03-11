@@ -251,21 +251,9 @@ def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session
         
         seen_categories = set()
         
-        # Chercher les catégories principales avec les classes spécifiques
-        # Les catégories intéressantes ont: class="li-niveau1 advtm_menu_X" où X est 3, 4, 46, 6, 8, 11, 9, 10
-        category_classes = [
-            'li-niveau1 advtm_menu_3',
-            'li-niveau1 advtm_menu_4',
-            'li-niveau1 advtm_menu_46',
-            'li-niveau1 advtm_menu_6',
-            'li-niveau1 advtm_menu_8',
-            'li-niveau1 advtm_menu_11',
-            'li-niveau1 advtm_menu_9',
-            'li-niveau1 advtm_menu_10'
-        ]
-        
-        # Chercher tous les <li> avec class commençant par "li-niveau1 advtm_menu_"
-        category_lis = menu_ul.find_all('li', class_=re.compile(r'li-niveau1 advtm_menu_\d+'))
+        # Chercher tous les <li> de premier niveau du menu.
+        # On reste volontairement générique (pas de dépendance aux numéros advtm_menu_X)
+        category_lis = menu_ul.find_all('li', class_=re.compile(r'li-niveau1', re.I))
         
         for li in category_lis:
             # Chercher le lien <a class="a-niveau1" data-type="category">
@@ -294,9 +282,14 @@ def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session
                 else:
                     category_url = urljoin(BASE_URL, href)
                 
-                # Filtrer les liens qui ne sont pas des catégories
+                # Filtrer les liens qui ne sont pas des catégories (pages techniques, compte, blog, etc.)
                 href_lower = href.lower()
-                if any(exclude in href_lower for exclude in ['/cart', '/checkout', '/account', '/search', '/contact', '/about', '/blog', 'javascript:', 'mailto:', '#']):
+                if any(exclude in href_lower for exclude in [
+                    '/cart', '/checkout', '/account', '/search', '/contact',
+                    '/about', '/blog', 'javascript:', 'mailto:', '#',
+                    '/programme-fidelite', '/nos-boutiques', '/qui-sommes-nous',
+                    '/module-blog', '/page/professionnels', '/archives'
+                ]):
                     continue
                 
                 # Ajouter la catégorie si elle n'a pas déjà été vue
@@ -307,17 +300,19 @@ def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session
                     })
                     seen_categories.add(category_url)
         
-        # Filtrer pour ne garder que les catégories produits valides (2 à 9)
-        # TOILES AU MÈTRE, TABLE, CUISINE, DÉCO, BAGAGERIE, ACCESSOIRES, BAIN & PLAGE, EXTERIEUR & JARDIN
+        # Filtrer pour ne garder que les catégories produits principales visibles
+        # dans le menu actuel du site Artiga.
+        # On cible les rubriques e‑commerce, pas les pages institutionnelles :
+        # UNIVERS, COLLECTION, LINGE DE MAISON, SACS & ACCESSOIRES,
+        # EXTERIEUR & JARDIN, SUR-MESURE, IDÉES CADEAUX.
         valid_category_names = [
-            'TOILES AU MÈTRE',
-            'TABLE',
-            'CUISINE',
-            'DÉCO',
-            'BAGAGERIE',
-            'ACCESSOIRES',
-            'BAIN & PLAGE',
-            'EXTERIEUR & JARDIN'
+            'UNIVERS',
+            'COLLECTION',
+            'LINGE DE MAISON',
+            'SACS & ACCESSOIRES',
+            'EXTERIEUR & JARDIN',
+            'SUR-MESURE',
+            'IDÉES CADEAUX'
         ]
         
         filtered_categories = []
@@ -326,6 +321,17 @@ def get_categories(driver: Optional[webdriver.Chrome], session: requests.Session
             cat_name_upper = cat['name'].upper()
             if any(valid_name.upper() in cat_name_upper or cat_name_upper in valid_name.upper() for valid_name in valid_category_names):
                 filtered_categories.append(cat)
+        
+        # Si le site a changé et qu'on ne récupère presque plus rien
+        # (par ex. seulement 1–2 catégories), on renvoie toutes les catégories
+        # détectées plutôt que de filtrer trop agressivement.
+        if len(filtered_categories) < 4 and len(categories) >= len(filtered_categories):
+            logger.warning(
+                f"Seulement {len(filtered_categories)} catégorie(s) correspond(ent) au filtre "
+                f"sur {len(categories)} détectées – retour à la liste complète."
+            )
+            logger.info(f"{len(categories)} catégorie(s) principale(s) trouvée(s) (sans filtre strict)")
+            return categories
         
         logger.info(f"{len(filtered_categories)} catégorie(s) principale(s) trouvée(s) (filtrées sur {len(categories)} total)")
         return filtered_categories

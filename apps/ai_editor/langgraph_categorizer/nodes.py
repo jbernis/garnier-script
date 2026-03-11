@@ -150,12 +150,12 @@ def taxonomy_selection_node(
         state['confidence'] = 0.05
         state['rationale'] = f"Erreur: {str(e)}"
     
-    # Logs détaillés de la réponse de l'agent
+    # Logs détaillés de la réponse de l'agent (utiliser state pour éviter UnboundLocalError)
     logger.info("=" * 80)
     logger.info("🎯 AGENT 2 - TAXONOMY SPECIALIST - RÉPONSE COMPLÈTE:")
-    logger.info(f"  • chosen_category: {category_path}")
-    logger.info(f"  • confidence: {confidence:.2f} ({int(confidence*100)}%)")
-    logger.info(f"  • rationale: {rationale}")
+    logger.info(f"  • chosen_category: {state.get('selected_category_path', 'N/A')}")
+    logger.info(f"  • confidence: {state.get('confidence', 0):.2f} ({int(state.get('confidence', 0)*100)}%)")
+    logger.info(f"  • rationale: {state.get('rationale', 'N/A')}")
     logger.info("=" * 80)
     
     return state

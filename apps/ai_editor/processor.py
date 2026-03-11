@@ -768,13 +768,13 @@ class CSVAIProcessor:
                 if not gemini_api_key:
                     raise ValueError("Credentials Gemini non trouvés. Google Shopping nécessite Gemini.")
                 
-                # Récupérer le modèle Gemini sauvegardé en base
-                gemini_model = self.db.get_ai_model('gemini') or 'gemini-2.0-flash-exp'
+                # Récupérer le modèle Gemini sauvegardé en base (ou None pour utiliser le défaut du provider)
+                gemini_model = self.db.get_ai_model('gemini')
                 
                 gemini_provider = get_provider(
                     'gemini',
                     api_key=gemini_api_key,
-                    model=gemini_model
+                    model=gemini_model  # Si None, le provider utilisera son modèle par défaut
                 )
                 
                 agents['google_category'] = GoogleShoppingAgent(
@@ -1004,13 +1004,13 @@ class CSVAIProcessor:
             if not gemini_api_key:
                 raise ValueError("Credentials Gemini non trouvés. Google Shopping nécessite Gemini.")
             
-            # Récupérer le modèle Gemini sauvegardé en base
-            gemini_model = self.db.get_ai_model('gemini') or 'gemini-2.0-flash-exp'
+            # Récupérer le modèle Gemini sauvegardé en base (ou None pour utiliser le défaut du provider)
+            gemini_model = self.db.get_ai_model('gemini')
             
             gemini_provider = get_provider(
                 'gemini',
                 api_key=gemini_api_key,
-                model=gemini_model
+                model=gemini_model  # Si None, le provider utilisera son modèle par défaut
             )
             
             agents = {
